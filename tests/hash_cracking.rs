@@ -586,3 +586,272 @@ async fn word_in_both_dictionaries_no_duplicate() {
     let suc_count = body.matches("class=\"suc\"").count();
     assert_eq!(suc_count, 2, "expected 2 success rows (no duplicates), got {}", suc_count);
 }
+
+// ===== XSS regression tests =====
+
+/// Submit HTML/script tags as hash input and verify Askama's auto-escaping
+/// prevents reflected XSS in both the textarea echo and the results table.
+#[tokio::test]
+async fn xss_script_tag_escaped_in_textarea_and_results() {
+    let xss_payload = "<script>alert('xss')</script>";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", xss_payload)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "XSS script tag");
+    let body = resp.text().await.unwrap();
+
+    // The raw <script> tag must NOT appear anywhere in the response
+    assert_body_does_not_contain(&body, "<script>alert(", "raw <script> tag must be escaped");
+
+    // The HTML-escaped version must appear (Askama auto-escapes {{ }})
+    assert_body_contains(
+        &body,
+        "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;",
+        "script tag should be HTML-escaped",
+    );
+}
+
+/// Submit quote-heavy and attribute-injection payloads.
+#[tokio::test]
+async fn xss_quotes_and_attributes_escaped() {
+    let xss_payload = "\" onmouseover=\"alert(1)\" x=\"";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", xss_payload)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "XSS attribute injection");
+    let body = resp.text().await.unwrap();
+
+    // Raw quotes that could break out of attributes must be escaped
+    assert_body_does_not_contain(
+        &body,
+        "onmouseover=\"alert(1)\"",
+        "attribute injection must be escaped",
+    );
+    assert_body_contains(
+        &body,
+        "&quot;",
+        "double quotes should be HTML-escaped to &quot;",
+    );
+}
+
+/// Submit a valid hex hash mixed with HTML to ensure the hash column in the
+/// results table also escapes properly (not just the textarea).
+#[tokio::test]
+async fn xss_html_in_hash_column_escaped() {
+    // This is valid hex length but contains <img> tag characters — it will
+    // fail hash format validation (non-hex chars) and appear in a format
+    // error row, which reflects result.hash in the <td>.
+    let xss_hash = "<img src=x onerror=alert(1)>";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", xss_hash)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "XSS in hash column");
+    let body = resp.text().await.unwrap();
+
+    // The raw <img> tag must not appear
+    assert_body_does_not_contain(&body, "<img src=x", "raw <img> tag must be escaped");
+    assert_body_contains(
+        &body,
+        "&lt;img src=x onerror=alert(1)&gt;",
+        "<img> should be HTML-escaped in result row",
+    );
+}
+
+// ===== Input normalization tests =====
+
+/// Submit hashes separated by Windows \r\n line endings.
+/// The handler normalizes \r\n to \n before splitting.
+#[tokio::test]
+async fn input_normalization_windows_line_endings() {
+    // md5("password") and md5("hello") separated by \r\n
+    let hashes = "5f4dcc3b5aa765d61d8327deb882cf99\r\n5d41402abc4b2a76b9719d911017c592";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "Windows line endings");
+    let body = resp.text().await.unwrap();
+
+    // Both hashes should be cracked despite \r\n separator
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>password</td>",
+        "first hash should crack 'password' with \\r\\n separator",
+    );
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>hello</td>",
+        "second hash should crack 'hello' with \\r\\n separator",
+    );
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 2, "expected 2 success rows with \\r\\n input, got {}", suc_count);
+}
+
+/// Submit a bare \r as line separator (old Mac format).
+#[tokio::test]
+async fn input_normalization_bare_cr() {
+    let hashes = "5f4dcc3b5aa765d61d8327deb882cf99\r5d41402abc4b2a76b9719d911017c592";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "bare CR");
+    let body = resp.text().await.unwrap();
+
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>password</td>",
+        "first hash should crack with \\r separator",
+    );
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>hello</td>",
+        "second hash should crack with \\r separator",
+    );
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 2, "expected 2 success rows with \\r input, got {}", suc_count);
+}
+
+/// Submit MySQL 4.1+ hash with surrounding asterisks (*HASH*).
+/// The handler strips leading/trailing * before cracking.
+#[tokio::test]
+async fn input_normalization_mysql_asterisks() {
+    // sha1("password") wrapped in asterisks, as MySQL's PASSWORD() function outputs
+    let hash_with_asterisks = "*5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8*";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hash_with_asterisks)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "MySQL asterisks");
+    let body = resp.text().await.unwrap();
+
+    assert_body_contains(
+        &body,
+        "<td>sha1</td><td>password</td>",
+        "asterisk-wrapped hash should crack after stripping",
+    );
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 1, "expected 1 success row for asterisk-wrapped hash, got {}", suc_count);
+}
+
+/// Submit hashes with leading/trailing whitespace.
+#[tokio::test]
+async fn input_normalization_whitespace_trimming() {
+    let hashes = "  5f4dcc3b5aa765d61d8327deb882cf99  \n\t5d41402abc4b2a76b9719d911017c592\t";
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "whitespace trimming");
+    let body = resp.text().await.unwrap();
+
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>password</td>",
+        "whitespace-padded hash should crack",
+    );
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>hello</td>",
+        "tab-padded hash should crack",
+    );
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 2, "expected 2 success rows after whitespace trimming, got {}", suc_count);
+}
+
+// ===== Result ordering test =====
+
+/// Submit a mix of hash types in a specific order and verify that result rows
+/// appear in the same order as submitted. The cracking core does nontrivial
+/// index reconstruction (separating valid/invalid hashes, batching to the oracle,
+/// then reassembling in original order) — this test catches ordering bugs.
+#[tokio::test]
+async fn results_preserve_submission_order() {
+    // Submit 5 hashes in a deliberate order mixing all result types:
+    //   1. md5("hello")        → full match (suc)
+    //   2. "not-a-hex-hash"    → format error (fail)
+    //   3. 40 zeroes           → not found (fail)
+    //   4. sha1("password")    → full match (suc)
+    //   5. md5 prefix monkey   → partial match (part)
+    let hash1 = "5d41402abc4b2a76b9719d911017c592";
+    let hash2 = "not-a-hex-hash";
+    let hash3 = "0000000000000000000000000000000000000000";
+    let hash4 = "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8";
+    let hash5 = "d0763edaa9d9bd2a0000000000000000";
+
+    let hashes = [hash1, hash2, hash3, hash4, hash5].join("\n");
+
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes.as_str())])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "result ordering");
+    let body = resp.text().await.unwrap();
+
+    // Extract the portion of the body that contains result rows (between
+    // <table class="results"> and </table>) to avoid matching the textarea.
+    let table_start = body
+        .find("class=\"results\"")
+        .expect("results table must be present");
+    let table_body = &body[table_start..];
+
+    // Find each hash's position within the results table.
+    // The first <td> in each row is the hash itself.
+    let pos1 = table_body
+        .find(&format!("<td>{}</td>", hash1))
+        .unwrap_or_else(|| panic!("hash1 ({}) not found in results table", hash1));
+    let pos2 = table_body
+        .find(&format!("<td>{}</td>", hash2))
+        .unwrap_or_else(|| panic!("hash2 ({}) not found in results table", hash2));
+    let pos3 = table_body
+        .find(&format!("<td>{}</td>", hash3))
+        .unwrap_or_else(|| panic!("hash3 ({}) not found in results table", hash3));
+    let pos4 = table_body
+        .find(&format!("<td>{}</td>", hash4))
+        .unwrap_or_else(|| panic!("hash4 ({}) not found in results table", hash4));
+    let pos5 = table_body
+        .find(&format!("<td>{}</td>", hash5))
+        .unwrap_or_else(|| panic!("hash5 ({}) not found in results table", hash5));
+
+    assert!(
+        pos1 < pos2 && pos2 < pos3 && pos3 < pos4 && pos4 < pos5,
+        "Result rows must appear in submission order.\n\
+         Positions: hash1={}, hash2={}, hash3={}, hash4={}, hash5={}",
+        pos1, pos2, pos3, pos4, pos5,
+    );
+}
