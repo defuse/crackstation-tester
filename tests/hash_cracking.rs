@@ -459,3 +459,130 @@ async fn unrecognized_hash_format() {
     // "Not found." also appears in the color codes legend, so match the result row markup
     assert_body_does_not_contain(&body, "<td>Not found.</td>", "invalid hashes should not show 'Not found.'");
 }
+
+/// Submit a hash for a word that's only in HUGELIST.lst (not REALUNIQ.lst).
+/// The md5-huge table should find it even though the regular md5 table can't.
+#[tokio::test]
+async fn word_only_in_huge_dictionary() {
+    // "elephant" is in HUGELIST.lst but NOT in REALUNIQ.lst
+    // md5("elephant") = e4b48fd541b3dcb99cababc87c2ee88f
+    // sha1("elephant") = 0ae9e4deba26021986ffd99636da6601f6393631
+    let hashes = [
+        "e4b48fd541b3dcb99cababc87c2ee88f",
+        "0ae9e4deba26021986ffd99636da6601f6393631",
+    ]
+    .join("\n");
+
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes.as_str())])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "huge-only word");
+    let body = resp.text().await.unwrap();
+
+    // Both should be found via the huge fallback tables
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>elephant</td>",
+        "md5-huge should find 'elephant'",
+    );
+    assert_body_contains(
+        &body,
+        "<td>sha1</td><td>elephant</td>",
+        "sha1-huge should find 'elephant'",
+    );
+
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 2, "expected 2 success rows for huge-only word, got {}", suc_count);
+    assert_body_does_not_contain(&body, "<td>Not found.</td>", "huge-only word should not be 'Not found.'");
+}
+
+/// Submit a hash for a word that's only in REALUNIQ.lst (not HUGELIST.lst).
+/// The regular md5/sha1 tables should find it.
+#[tokio::test]
+async fn word_only_in_small_dictionary() {
+    // "monkey" is in REALUNIQ.lst but NOT in HUGELIST.lst
+    // md5("monkey") = d0763edaa9d9bd2a9516280e9044d885
+    // sha1("monkey") = ab87d24bdc7452e55738deb5f868e1f16dea5ace
+    let hashes = [
+        "d0763edaa9d9bd2a9516280e9044d885",
+        "ab87d24bdc7452e55738deb5f868e1f16dea5ace",
+    ]
+    .join("\n");
+
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes.as_str())])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "small-only word");
+    let body = resp.text().await.unwrap();
+
+    // Both should be found via the regular (small) tables
+    assert_body_contains(
+        &body,
+        "<td>md5</td><td>monkey</td>",
+        "regular md5 should find 'monkey'",
+    );
+    assert_body_contains(
+        &body,
+        "<td>sha1</td><td>monkey</td>",
+        "regular sha1 should find 'monkey'",
+    );
+
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 2, "expected 2 success rows for small-only word, got {}", suc_count);
+    assert_body_does_not_contain(&body, "<td>Not found.</td>", "small-only word should not be 'Not found.'");
+}
+
+/// Submit a hash for a word that's in BOTH REALUNIQ.lst and HUGELIST.lst.
+/// It should be found exactly once (no duplicate results from both tables).
+/// The early_exit logic prevents the md5-huge table from re-matching after
+/// the regular md5 table already found a full match.
+#[tokio::test]
+async fn word_in_both_dictionaries_no_duplicate() {
+    // "hello" is in both REALUNIQ.lst and HUGELIST.lst
+    // md5("hello") = 5d41402abc4b2a76b9719d911017c592
+    // sha1("hello") = aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
+    let hashes = [
+        "5d41402abc4b2a76b9719d911017c592",
+        "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+    ]
+    .join("\n");
+
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", hashes.as_str())])
+        .send()
+        .await
+        .unwrap();
+
+    assert_success(&resp, "word in both dicts");
+    let body = resp.text().await.unwrap();
+
+    // Each hash should produce exactly one md5/sha1 result, not duplicated
+    let md5_hello_count = body.matches("<td>md5</td><td>hello</td>").count();
+    assert_eq!(
+        md5_hello_count, 1,
+        "md5('hello') should appear exactly once, not duplicated by md5-huge (got {})",
+        md5_hello_count,
+    );
+    let sha1_hello_count = body.matches("<td>sha1</td><td>hello</td>").count();
+    assert_eq!(
+        sha1_hello_count, 1,
+        "sha1('hello') should appear exactly once, not duplicated by sha1-huge (got {})",
+        sha1_hello_count,
+    );
+
+    // Exactly 2 success rows total (one per hash)
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 2, "expected 2 success rows (no duplicates), got {}", suc_count);
+}
