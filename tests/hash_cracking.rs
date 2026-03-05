@@ -264,8 +264,13 @@ async fn crack_all_hash_types() {
         "LM should return case variant 'HELLO'",
     );
 
-    // No failures or format errors
-    assert_body_does_not_contain(&body, "Not found.", "no hash should be 'Not found.'");
+    // Exactly 17 success rows: 14 algorithms × 1 match + LM × 3 case variants
+    let suc_count = body.matches("class=\"suc\"").count();
+    assert_eq!(suc_count, 17, "expected 17 success rows, got {}", suc_count);
+
+    // No failure result rows or format errors (note: "Not found." also appears in the
+    // color codes legend, so we match against the result row markup specifically)
+    assert_body_does_not_contain(&body, "<td>Not found.</td>", "no hash should be 'Not found.'");
     assert_body_does_not_contain(
         &body,
         "Unrecognized hash format.",
@@ -317,8 +322,13 @@ async fn prefix_match_partial_results() {
         "sha256 prefix should find 'monkey'",
     );
 
-    // No full matches (the suffixes are wrong)
+    // Exactly 3 partial match rows, one per algorithm
+    let part_count = body.matches("class=\"part\"").count();
+    assert_eq!(part_count, 3, "expected 3 partial match rows, got {}", part_count);
+
+    // No full matches (the suffixes are wrong) and no failures
     assert_body_does_not_contain(&body, "class=\"suc\"", "should not have full match rows");
+    assert_body_does_not_contain(&body, "<td>Not found.</td>", "should not have 'Not found.' rows");
 }
 
 /// Submit only the LM hash of "hello" and verify all 3 case variants are returned.
@@ -446,5 +456,6 @@ async fn unrecognized_hash_format() {
     // All rows should be failures (red)
     assert_body_does_not_contain(&body, "class=\"suc\"", "should not have success rows");
     assert_body_does_not_contain(&body, "class=\"part\"", "should not have partial match rows");
-    assert_body_does_not_contain(&body, "Not found.", "invalid hashes should not show 'Not found.'");
+    // "Not found." also appears in the color codes legend, so match the result row markup
+    assert_body_does_not_contain(&body, "<td>Not found.</td>", "invalid hashes should not show 'Not found.'");
 }
