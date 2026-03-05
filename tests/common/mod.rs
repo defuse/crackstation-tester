@@ -33,11 +33,19 @@ pub fn base_url() -> String {
     std::env::var("CRACKSTATION_URL").expect("CRACKSTATION_URL environment variable must be set")
 }
 
-/// Get the captcha bypass secret for hash cracking tests.
-/// CAPTCHA_BYPASS_SECRET environment variable must be set.
+/// Get the captcha bypass key for hash cracking tests.
+/// Reads from secrets/captcha-bypass-key.txt (gitignored).
 pub fn captcha_bypass_secret() -> String {
-    std::env::var("CAPTCHA_BYPASS_SECRET")
-        .expect("CAPTCHA_BYPASS_SECRET environment variable must be set")
+    let secrets_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("secrets");
+    let key_file = secrets_dir.join("captcha-bypass-key.txt");
+    std::fs::read_to_string(&key_file)
+        .unwrap_or_else(|e| panic!(
+            "Failed to read captcha bypass key from {}: {}. \
+             Generate it with: xxd -l 32 -p /dev/urandom | tr -d '\\n' > {}",
+            key_file.display(), e, key_file.display()
+        ))
+        .trim()
+        .to_string()
 }
 
 /// Check if tests are running against a local URL (localhost, 127.0.0.1, ::1).
