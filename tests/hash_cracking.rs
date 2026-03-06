@@ -10,6 +10,20 @@ use common::{
     captcha_bypass_secret, url,
 };
 
+/// Extract the content of the `<textarea name="hashes" ...>...</textarea>` element.
+fn extract_textarea(body: &str) -> &str {
+    let name_attr = "name=\"hashes\"";
+    let name_pos = body.find(name_attr)
+        .unwrap_or_else(|| panic!("no textarea with {} found in body", name_attr));
+    let after_name = &body[name_pos..];
+    let content_start = after_name.find('>')
+        .expect("no '>' after textarea name attribute") + 1;
+    let content_region = &after_name[content_start..];
+    let content_end = content_region.find("</textarea>")
+        .expect("no closing </textarea> tag found");
+    &content_region[..content_end]
+}
+
 /// Submit the MD5 of "password" and verify it's cracked.
 #[tokio::test]
 async fn crack_md5_password() {
@@ -159,12 +173,13 @@ async fn results_table_structure() {
     assert_body_contains(&body, "<th>Result</th>", "should have Result column header");
 }
 
-/// POST without captcha bypass or valid token should fail.
+/// POST without captcha bypass or valid token should fail and repopulate the textarea.
 #[tokio::test]
 async fn no_captcha_fails() {
+    let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let resp = client()
         .post(url("/"))
-        .form(&[("hashes", "5f4dcc3b5aa765d61d8327deb882cf99")])
+        .form(&[("hashes", hash)])
         .send()
         .await
         .unwrap();
@@ -172,15 +187,18 @@ async fn no_captcha_fails() {
     assert_success(&resp, "no captcha");
     let body = resp.text().await.unwrap();
     assert_body_contains(&body, "captcha", "should show captcha error");
+    let textarea_content = extract_textarea(&body);
+    assert_eq!(textarea_content, hash, "textarea should be repopulated with submitted hash");
 }
 
-/// Wrong captcha bypass secret should fail.
+/// Wrong captcha bypass secret should fail and repopulate the textarea.
 #[tokio::test]
 async fn wrong_bypass_secret_fails() {
+    let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let resp = client()
         .post(url("/"))
         .header("X-Captcha-Bypass", "wrong-secret-value")
-        .form(&[("hashes", "5f4dcc3b5aa765d61d8327deb882cf99")])
+        .form(&[("hashes", hash)])
         .send()
         .await
         .unwrap();
@@ -188,6 +206,8 @@ async fn wrong_bypass_secret_fails() {
     assert_success(&resp, "wrong bypass secret");
     let body = resp.text().await.unwrap();
     assert_body_contains(&body, "captcha", "should show captcha error");
+    let textarea_content = extract_textarea(&body);
+    assert_eq!(textarea_content, hash, "textarea should be repopulated with submitted hash");
 }
 
 /// The submitted hashes should be echoed back in the textarea.
