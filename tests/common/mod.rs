@@ -277,12 +277,31 @@ pub async fn post_form_with_bypass(
         .expect("Failed to send POST request")
 }
 
-// ===== Crack results table parsing =====
+
+// ===== HTML parsing helpers =====
+//
+// These parse the real DOM with `scraper` rather than searching the page source.
+// Text comes back entity-decoded, so assertions compare what a reader sees:
+// PHP's htmlspecialchars emits `&#039;` where Askama emits `&#x27;`, and both are
+// an apostrophe. Escaping regressions still fail, because a payload that was NOT
+// escaped parses as markup and stops being text.
+
+use scraper::{Html, Selector};
+
+/// Build a selector, panicking on a malformed one (always a bug in the test).
+fn sel(selector: &str) -> Selector {
+    Selector::parse(selector)
+        .unwrap_or_else(|e| panic!("invalid selector {:?}: {:?}", selector, e))
+}
+
+/// Collected text of an element, trimmed.
+fn text_of(element: scraper::ElementRef<'_>) -> String {
+    element.text().collect::<String>().trim().to_string()
+}
+
+// ===== Crack results table =====
 
 /// One row of the crack results table.
-///
-/// Cell contents are kept exactly as served, HTML-escaping included, so escaping
-/// regressions show up as assertion failures rather than being normalized away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRow {
     /// Row CSS class: `suc` (full match), `part` (prefix match), or `fail`.
@@ -342,65 +361,35 @@ impl ResultRow {
 /// Returns `None` when the page has no results table at all — a GET, or a POST
 /// rejected before cracking (bad captcha, too many hashes, empty input).
 pub fn parse_results(body: &str) -> Option<Vec<ResultRow>> {
-    const TABLE_OPEN: &str = "<table class=\"results\">";
+    let document = Html::parse_document(body);
+    let table = document.select(&sel("table.results")).next()?;
 
-    let table_start = body.find(TABLE_OPEN)?;
-    let after_open = &body[table_start + TABLE_OPEN.len()..];
-    let table_len = after_open
-        .find("</table>")
-        .expect("results table is missing its closing </table>");
-    let table = &after_open[..table_len];
-
-    let mut rows = Vec::new();
-    let mut rest = table;
-    while let Some(row_start) = rest.find("<tr") {
-        let from_row = &rest[row_start..];
-        let row_len = from_row
-            .find("</tr>")
-            .expect("result row is missing its closing </tr>");
-        let row_html = &from_row[..row_len];
-        rest = &from_row[row_len + "</tr>".len()..];
-
-        // The header row carries <th> cells and no class.
-        if row_html.contains("<th>") {
-            continue;
-        }
-
-        let cells: Vec<String> = row_html
-            .match_indices("<td>")
-            .map(|(open, _)| {
-                let content = &row_html[open + "<td>".len()..];
-                let close = content
-                    .find("</td>")
-                    .expect("result cell is missing its closing </td>");
-                content[..close].to_string()
+    let cell = sel("td");
+    let rows = table
+        .select(&sel("tr"))
+        .filter_map(|row| {
+            let cells: Vec<_> = row.select(&cell).collect();
+            if cells.is_empty() {
+                return None; // the <th> header row
+            }
+            assert_eq!(
+                cells.len(),
+                3,
+                "expected 3 cells in a result row, got {}",
+                cells.len()
+            );
+            let class = row
+                .value()
+                .attr("class")
+                .unwrap_or_else(|| panic!("result row has no class attribute"));
+            Some(ResultRow {
+                class: class.to_string(),
+                hash: text_of(cells[0]),
+                hash_type: text_of(cells[1]),
+                result: text_of(cells[2]),
             })
-            .collect();
-
-        assert_eq!(
-            cells.len(),
-            3,
-            "expected 3 cells in result row, got {} in: {}",
-            cells.len(),
-            row_html
-        );
-
-        let class_marker = "class=\"";
-        let class_start = row_html
-            .find(class_marker)
-            .unwrap_or_else(|| panic!("result row has no class attribute: {}", row_html))
-            + class_marker.len();
-        let class_len = row_html[class_start..]
-            .find('"')
-            .expect("unterminated class attribute");
-
-        rows.push(ResultRow {
-            class: row_html[class_start..class_start + class_len].to_string(),
-            hash: cells[0].clone(),
-            hash_type: cells[1].clone(),
-            result: cells[2].clone(),
-        });
-    }
+        })
+        .collect();
 
     Some(rows)
 }
@@ -415,7 +404,7 @@ pub fn results(body: &str) -> Vec<ResultRow> {
     })
 }
 
-// ===== Page metadata parsing =====
+// ===== Page metadata =====
 
 /// Site-wide defaults from PHP's URLParse.php ($DEFAULT_TITLE etc). Pages that
 /// declare no title/description/keywords of their own render these.
@@ -426,20 +415,7 @@ pub const DEFAULT_DESCRIPTION: &str =
 pub const DEFAULT_KEYWORDS: &str =
     "md5 cracking, sha1 cracking, hash cracking, password cracking";
 
-/// Decode the HTML entities the templates emit, so assertions compare page text
-/// rather than entity spelling. PHP's htmlspecialchars writes `&#039;` where
-/// Askama writes `&#x27;`; both render as an apostrophe, and the contract is the
-/// text, not the encoding.
-pub fn decode_entities(text: &str) -> String {
-    text.replace("&#x27;", "'")
-        .replace("&#039;", "'")
-        .replace("&quot;", "\"")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&") // must come last, or earlier output re-decodes
-}
-
-/// The `<head>` metadata of a rendered page, entity-decoded.
+/// The `<head>` metadata of a rendered page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageMeta {
     pub title: String,
@@ -447,37 +423,60 @@ pub struct PageMeta {
     pub keywords: String,
 }
 
-/// Extract the text between `open` and the next `close`, panicking if absent.
-fn extract_between(body: &str, open: &str, close: &str) -> String {
-    let start = body
-        .find(open)
-        .unwrap_or_else(|| panic!("page is missing {:?}", open))
-        + open.len();
-    let len = body[start..]
-        .find(close)
-        .unwrap_or_else(|| panic!("no {:?} after {:?}", close, open));
-    decode_entities(&body[start..start + len])
+/// Read the `content` attribute of `<meta name="...">`.
+fn meta_content(document: &Html, name: &str) -> String {
+    let selector = sel(&format!(r#"meta[name="{}"]"#, name));
+    document
+        .select(&selector)
+        .next()
+        .unwrap_or_else(|| panic!("page has no <meta name=\"{}\">", name))
+        .value()
+        .attr("content")
+        .unwrap_or_else(|| panic!("<meta name=\"{}\"> has no content attribute", name))
+        .to_string()
 }
 
 /// Parse `<title>`, `<meta name="description">`, and `<meta name="keywords">`.
 pub fn page_meta(body: &str) -> PageMeta {
+    let document = Html::parse_document(body);
+    let title = document
+        .select(&sel("title"))
+        .next()
+        .unwrap_or_else(|| panic!("page has no <title>"));
     PageMeta {
-        title: extract_between(body, "<title>", "</title>"),
-        description: extract_between(body, "<meta name=\"description\" content=\"", "\""),
-        keywords: extract_between(body, "<meta name=\"keywords\" content=\"", "\""),
+        title: text_of(title),
+        description: meta_content(&document, "description"),
+        keywords: meta_content(&document, "keywords"),
     }
 }
 
-/// Extract the text of the page's single `<h1>`, panicking if there isn't exactly one.
+/// Text of the page's single `<h1>`, panicking if there isn't exactly one.
 pub fn h1(body: &str) -> String {
-    let count = body.matches("<h1").count();
-    assert_eq!(count, 1, "expected exactly one <h1> on the page, found {}", count);
-    let start = body.find("<h1").expect("checked above");
-    let text_start = body[start..].find('>').expect("unterminated <h1") + start + 1;
-    let len = body[text_start..]
-        .find("</h1>")
-        .expect("no closing </h1>");
-    decode_entities(&body[text_start..text_start + len])
+    let document = Html::parse_document(body);
+    let headings: Vec<_> = document.select(&sel("h1")).collect();
+    assert_eq!(
+        headings.len(),
+        1,
+        "expected exactly one <h1> on the page, found {}",
+        headings.len()
+    );
+    text_of(headings[0])
+}
+
+/// Count elements matching a CSS selector.
+pub fn count_matching(body: &str, selector: &str) -> usize {
+    Html::parse_document(body).select(&sel(selector)).count()
+}
+
+/// Text content of the `<textarea name="hashes">`, which the server repopulates
+/// with whatever was submitted.
+pub fn submitted_hashes_textarea(body: &str) -> String {
+    let document = Html::parse_document(body);
+    let textarea = document
+        .select(&sel(r#"textarea[name="hashes"]"#))
+        .next()
+        .expect("page has no <textarea name=\"hashes\">");
+    textarea.text().collect::<String>()
 }
 
 /// GET a path, assert it returns exactly 200, and return the body.

@@ -13,7 +13,8 @@ mod common;
 
 use common::{
     assert_body_contains, assert_body_does_not_contain, assert_success, captcha_bypass_secret,
-    client, is_production_url, parse_results, results, url, ResultRow,
+    client, is_production_url, parse_results, results, submitted_hashes_textarea, url,
+    ResultRow,
 };
 
 /// Captcha *rejection* is unreachable in dev: `dev/dotenv-example` sets
@@ -37,24 +38,6 @@ fn require_captcha_enforcement(test_name: &str) {
          there, so this test would verify nothing. Point CRACKSTATION_URL at production.",
         test_name
     );
-}
-
-/// Extract the content of the `<textarea name="hashes" ...>...</textarea>` element.
-fn extract_textarea(body: &str) -> &str {
-    let name_attr = "name=\"hashes\"";
-    let name_pos = body
-        .find(name_attr)
-        .unwrap_or_else(|| panic!("no textarea with {} found in body", name_attr));
-    let after_name = &body[name_pos..];
-    let content_start = after_name
-        .find('>')
-        .expect("no '>' after textarea name attribute")
-        + 1;
-    let content_region = &after_name[content_start..];
-    let content_end = content_region
-        .find("</textarea>")
-        .expect("no closing </textarea> tag found");
-    &content_region[..content_end]
 }
 
 /// Extract the red error message shown above the results, if any.
@@ -223,7 +206,7 @@ async fn no_captcha_fails() {
         "a captcha failure must not crack anything"
     );
     assert_eq!(
-        extract_textarea(&body),
+        submitted_hashes_textarea(&body),
         hash,
         "textarea should be repopulated with the submitted hash"
     );
@@ -257,7 +240,7 @@ async fn wrong_bypass_secret_fails() {
         "a wrong bypass secret must not crack anything"
     );
     assert_eq!(
-        extract_textarea(&body),
+        submitted_hashes_textarea(&body),
         hash,
         "textarea should be repopulated with the submitted hash"
     );
@@ -267,7 +250,7 @@ async fn wrong_bypass_secret_fails() {
 async fn submitted_hashes_echoed_back() {
     let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let body = crack(hash).await;
-    assert_eq!(extract_textarea(&body), hash);
+    assert_eq!(submitted_hashes_textarea(&body), hash);
 }
 
 // ===== Algorithm coverage =====
@@ -464,19 +447,20 @@ async fn word_in_both_dictionaries_no_duplicate() {
 #[tokio::test]
 async fn xss_script_tag_escaped_in_textarea_and_results() {
     let payload = "<script>alert('xss')</script>";
-    let escaped = "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;";
 
     let body = crack(payload).await;
 
     assert_body_does_not_contain(&body, "<script>alert(", "raw <script> tag must be escaped");
-    assert_eq!(results(&body), vec![ResultRow::bad_format(escaped)]);
-    assert_eq!(extract_textarea(&body), escaped);
+    // The cell's text is the payload verbatim only because it was escaped into a
+    // text node. Had it been emitted raw, it would have parsed as a <script>
+    // element and the text would be just "alert('xss')".
+    assert_eq!(results(&body), vec![ResultRow::bad_format(payload)]);
+    assert_eq!(submitted_hashes_textarea(&body), payload);
 }
 
 #[tokio::test]
 async fn xss_quotes_and_attributes_escaped() {
     let payload = "\" onmouseover=\"alert(1)\" x=\"";
-    let escaped = "&quot; onmouseover=&quot;alert(1)&quot; x=&quot;";
 
     let body = crack(payload).await;
 
@@ -485,19 +469,20 @@ async fn xss_quotes_and_attributes_escaped() {
         "onmouseover=\"alert(1)\"",
         "attribute injection must be escaped",
     );
-    assert_eq!(results(&body), vec![ResultRow::bad_format(escaped)]);
-    assert_eq!(extract_textarea(&body), escaped);
+    assert_eq!(results(&body), vec![ResultRow::bad_format(payload)]);
+    assert_eq!(submitted_hashes_textarea(&body), payload);
 }
 
 #[tokio::test]
 async fn xss_html_in_hash_column_escaped() {
     let payload = "<img src=x onerror=alert(1)>";
-    let escaped = "&lt;img src=x onerror=alert(1)&gt;";
 
     let body = crack(payload).await;
 
     assert_body_does_not_contain(&body, "<img src=x", "raw <img> tag must be escaped");
-    assert_eq!(results(&body), vec![ResultRow::bad_format(escaped)]);
+    // <img> is a void element: emitted raw it would contribute no text at all,
+    // so recovering the payload verbatim proves it was escaped.
+    assert_eq!(results(&body), vec![ResultRow::bad_format(payload)]);
 }
 
 // ===== Input normalization tests =====
