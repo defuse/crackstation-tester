@@ -78,13 +78,13 @@ async fn hit_increments_non_unique_only() {
 
     // First hit
     let resp1 = client.get(&page_url).send().await.expect("First request failed");
-    assert!(resp1.status().is_success(), "First request returned {}", resp1.status());
+    assert_eq!(resp1.status().as_u16(), 200, "first request should return 200");
     let body1 = resp1.text().await.expect("Failed to read first response");
     let (page_hits_1, unique_hits_1) = extract_hit_counts(&body1);
 
     // Second hit (same IP, should only increment non-unique)
     let resp2 = client.get(&page_url).send().await.expect("Second request failed");
-    assert!(resp2.status().is_success(), "Second request returned {}", resp2.status());
+    assert_eq!(resp2.status().as_u16(), 200, "second request should return 200");
     let body2 = resp2.text().await.expect("Failed to read second response");
     let (page_hits_2, unique_hits_2) = extract_hit_counts(&body2);
 
@@ -123,7 +123,7 @@ async fn hit_counter_bot_not_counted() {
         .send()
         .await
         .expect("First request failed");
-    assert!(resp1.status().is_success());
+    assert_eq!(resp1.status().as_u16(), 200);
     let body1 = resp1.text().await.expect("Failed to read response");
     let (page_hits_before, _) = extract_hit_counts(&body1);
 
@@ -134,7 +134,7 @@ async fn hit_counter_bot_not_counted() {
         .send()
         .await
         .expect("Bot request failed");
-    assert!(resp_bot.status().is_success());
+    assert_eq!(resp_bot.status().as_u16(), 200);
 
     // Check count again with normal UA
     let resp2 = client
@@ -143,7 +143,7 @@ async fn hit_counter_bot_not_counted() {
         .send()
         .await
         .expect("Second request failed");
-    assert!(resp2.status().is_success());
+    assert_eq!(resp2.status().as_u16(), 200);
     let body2 = resp2.text().await.expect("Failed to read response");
     let (page_hits_after, _) = extract_hit_counts(&body2);
 

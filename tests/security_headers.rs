@@ -1,243 +1,158 @@
 //! Security header tests
 //!
-//! Tests for security-related HTTP headers across all route types.
+//! Every header is compared for an exact value, not a case-insensitive or
+//! substring match — a header that drifts to a weaker but similar-looking value
+//! is exactly the regression these tests exist to catch.
+//!
+//! Note that X-Content-Type-Options and Referrer-Policy are additions the port
+//! makes over PHP: the live PHP site sends only HSTS (from Caddy), X-Frame-Options,
+//! and Content-Type. HSTS itself matches the live site byte for byte.
 
 mod common;
 
 use common::{client, is_production_url, url};
 
-/// All paths to test - covers different routing logic paths
+const EXPECTED_X_FRAME_OPTIONS: &str = "SAMEORIGIN";
+const EXPECTED_X_CONTENT_TYPE_OPTIONS: &str = "nosniff";
+const EXPECTED_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
+const EXPECTED_HSTS: &str = "max-age=31536000; includeSubDomains; preload";
+
+/// Paths covering each routing path: dynamic page, static CSS, static image.
 const TEST_PATHS: &[&str] = &[
-    "/",                                                          // Home page (dynamic)
-    "/about-us.htm",                                              // Regular page (dynamic)
-    "/css/main.css",                                              // Static CSS
-    "/images/crackstation_header.png",                            // Static image
+    "/",
+    "/about-us.htm",
+    "/css/main.css",
+    "/images/crackstation_header.png",
 ];
 
-// =============================================================================
-// X-Frame-Options
-// =============================================================================
+/// Read a header as a string, panicking with context if it is absent.
+fn header_value(resp: &reqwest::Response, name: &str, context: &str) -> String {
+    resp.headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("{}: {} header is missing", context, name))
+        .to_str()
+        .unwrap_or_else(|_| panic!("{}: {} header is not valid UTF-8", context, name))
+        .to_string()
+}
 
-/// X-Frame-Options should be SAMEORIGIN on all paths
+/// Assert the three headers every response must carry, whatever its status.
+fn assert_baseline_headers(resp: &reqwest::Response, context: &str) {
+    assert_eq!(
+        header_value(resp, "x-frame-options", context),
+        EXPECTED_X_FRAME_OPTIONS,
+        "{}: wrong X-Frame-Options",
+        context
+    );
+    assert_eq!(
+        header_value(resp, "x-content-type-options", context),
+        EXPECTED_X_CONTENT_TYPE_OPTIONS,
+        "{}: wrong X-Content-Type-Options",
+        context
+    );
+    assert_eq!(
+        header_value(resp, "referrer-policy", context),
+        EXPECTED_REFERRER_POLICY,
+        "{}: wrong Referrer-Policy",
+        context
+    );
+}
+
 #[tokio::test]
-async fn x_frame_options_on_all_paths() {
+async fn baseline_headers_on_every_path() {
     for path in TEST_PATHS {
         let resp = client().get(url(path)).send().await.unwrap();
-        assert!(
-            resp.status().is_success(),
-            "{} should return 200, got {}",
-            path,
-            resp.status()
-        );
-
-        let header = resp
-            .headers()
-            .get("x-frame-options")
-            .unwrap_or_else(|| panic!("X-Frame-Options missing on {}", path))
-            .to_str()
-            .unwrap();
-
         assert_eq!(
-            header.to_uppercase(),
-            "SAMEORIGIN",
-            "X-Frame-Options should be SAMEORIGIN on {}, got: {}",
-            path,
-            header
+            resp.status().as_u16(),
+            200,
+            "{} should return 200",
+            path
         );
+        assert_baseline_headers(&resp, path);
     }
 }
 
-// =============================================================================
-// HSTS (production HTTPS only)
-// =============================================================================
-
-/// HSTS should be present on all paths over HTTPS
+/// Headers must survive on non-200 responses too — a redirect or an error page is
+/// still a page an attacker can try to frame.
 #[tokio::test]
-async fn hsts_on_all_paths() {
-    if !is_production_url() {
-        eprintln!("Skipping HSTS test on local URL");
-        return;
-    }
-
-    for path in TEST_PATHS {
-        let https_url = url(path).replace("http://", "https://");
-        let resp = client().get(&https_url).send().await.unwrap();
-
-        let header = resp
-            .headers()
-            .get("strict-transport-security")
-            .unwrap_or_else(|| panic!("HSTS missing on {}", path))
-            .to_str()
-            .unwrap();
-
-        assert!(
-            header.contains("max-age="),
-            "HSTS should have max-age on {}, got: {}",
-            path,
-            header
-        );
-    }
-}
-
-// =============================================================================
-// X-Content-Type-Options
-// =============================================================================
-
-/// X-Content-Type-Options: nosniff on all paths
-#[tokio::test]
-async fn x_content_type_options_on_all_paths() {
-    for path in TEST_PATHS {
-        let resp = client().get(url(path)).send().await.unwrap();
-        assert!(
-            resp.status().is_success(),
-            "{} should return 200, got {}",
-            path,
-            resp.status()
-        );
-
-        let header = resp
-            .headers()
-            .get("x-content-type-options")
-            .unwrap_or_else(|| panic!("X-Content-Type-Options missing on {}", path))
-            .to_str()
-            .unwrap();
-
-        assert_eq!(
-            header.to_lowercase(),
-            "nosniff",
-            "X-Content-Type-Options should be nosniff on {}, got: {}",
-            path,
-            header
-        );
-    }
-}
-
-// =============================================================================
-// Referrer-Policy
-// =============================================================================
-
-/// Referrer-Policy on all paths
-#[tokio::test]
-async fn referrer_policy_on_all_paths() {
-    for path in TEST_PATHS {
-        let resp = client().get(url(path)).send().await.unwrap();
-        assert!(
-            resp.status().is_success(),
-            "{} should return 200, got {}",
-            path,
-            resp.status()
-        );
-
-        let header = resp
-            .headers()
-            .get("referrer-policy")
-            .unwrap_or_else(|| panic!("Referrer-Policy missing on {}", path))
-            .to_str()
-            .unwrap();
-
-        assert_eq!(
-            header, "strict-origin-when-cross-origin",
-            "Referrer-Policy should be strict-origin-when-cross-origin on {}, got: {}",
-            path,
-            header
-        );
-    }
-}
-
-// =============================================================================
-// Security Headers on Redirect Responses
-// =============================================================================
-
-/// 301 redirect responses should carry security headers
-#[tokio::test]
-async fn security_headers_on_301_redirect() {
+async fn baseline_headers_on_redirect() {
     let resp = client().get(url("/about-us")).send().await.unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        301,
-        "/about-us should return 301"
-    );
-
-    let headers = resp.headers();
-
-    let xfo = headers
-        .get("x-frame-options")
-        .expect("301 redirect should have X-Frame-Options")
-        .to_str()
-        .unwrap();
-    assert_eq!(
-        xfo.to_uppercase(),
-        "SAMEORIGIN",
-        "301 redirect should have X-Frame-Options: SAMEORIGIN, got: {}",
-        xfo
-    );
-
-    let xcto = headers
-        .get("x-content-type-options")
-        .expect("301 redirect should have X-Content-Type-Options")
-        .to_str()
-        .unwrap();
-    assert_eq!(
-        xcto.to_lowercase(),
-        "nosniff",
-        "301 redirect should have X-Content-Type-Options: nosniff, got: {}",
-        xcto
-    );
-
-    let rp = headers
-        .get("referrer-policy")
-        .expect("301 redirect should have Referrer-Policy")
-        .to_str()
-        .unwrap();
-    assert_eq!(
-        rp, "strict-origin-when-cross-origin",
-        "301 redirect should have Referrer-Policy: strict-origin-when-cross-origin, got: {}",
-        rp
-    );
+    assert_eq!(resp.status().as_u16(), 301, "/about-us should return 301");
+    assert_baseline_headers(&resp, "301 redirect");
 }
 
-// =============================================================================
-// Security Headers on Error Responses
-// =============================================================================
-
-/// 404 error pages should carry security headers
 #[tokio::test]
-async fn security_headers_on_404() {
+async fn baseline_headers_on_404() {
     let resp = client()
         .get(url("/nonexistent-page-12345.htm"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 404, "Should return 404");
+    assert_eq!(resp.status().as_u16(), 404);
+    assert_baseline_headers(&resp, "404 response");
+}
 
-    let headers = resp.headers();
-    assert_eq!(
-        headers
-            .get("x-frame-options")
-            .expect("404 should have X-Frame-Options")
-            .to_str()
-            .unwrap()
-            .to_uppercase(),
-        "SAMEORIGIN",
-        "404 should have X-Frame-Options: SAMEORIGIN"
+#[tokio::test]
+async fn baseline_headers_on_405() {
+    let resp = client().post(url("/about-us.htm")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 405);
+    assert_baseline_headers(&resp, "405 response");
+}
+
+/// Content-Type is set exactly, and static assets keep their own type rather than
+/// being forced to text/html.
+#[tokio::test]
+async fn content_type_is_exact_per_path() {
+    for (path, expected) in [
+        ("/", "text/html; charset=utf-8"),
+        ("/about-us.htm", "text/html; charset=utf-8"),
+        ("/css/main.css", "text/css"),
+    ] {
+        let resp = client().get(url(path)).send().await.unwrap();
+        assert_eq!(
+            header_value(&resp, "content-type", path),
+            expected,
+            "{}: wrong Content-Type",
+            path
+        );
+    }
+}
+
+/// HSTS must NOT be sent from a dev host, or a developer's browser would pin
+/// localhost to HTTPS and lock them out of the plain-HTTP dev server.
+#[tokio::test]
+async fn hsts_absent_on_dev_host() {
+    if is_production_url() {
+        eprintln!("skipping dev-only HSTS absence check against production");
+        return;
+    }
+    for path in TEST_PATHS {
+        let resp = client().get(url(path)).send().await.unwrap();
+        assert!(
+            resp.headers().get("strict-transport-security").is_none(),
+            "{}: HSTS must not be sent from a dev host",
+            path
+        );
+    }
+}
+
+/// HSTS is only emitted over HTTPS from a non-dev host, so this needs production.
+#[tokio::test]
+#[ignore = "needs an HTTPS production host; run with CRACKSTATION_URL=https://crackstation.net -- --include-ignored"]
+async fn hsts_exact_value_in_production() {
+    assert!(
+        is_production_url(),
+        "hsts_exact_value_in_production requires CRACKSTATION_URL to point at production; \
+         a dev host deliberately omits HSTS, so this would verify nothing."
     );
-    assert_eq!(
-        headers
-            .get("x-content-type-options")
-            .expect("404 should have X-Content-Type-Options")
-            .to_str()
-            .unwrap()
-            .to_lowercase(),
-        "nosniff",
-        "404 should have X-Content-Type-Options: nosniff"
-    );
-    assert_eq!(
-        headers
-            .get("referrer-policy")
-            .expect("404 should have Referrer-Policy")
-            .to_str()
-            .unwrap(),
-        "strict-origin-when-cross-origin",
-        "404 should have Referrer-Policy: strict-origin-when-cross-origin"
-    );
+
+    for path in TEST_PATHS {
+        let https_url = url(path).replace("http://", "https://");
+        let resp = client().get(&https_url).send().await.unwrap();
+        assert_eq!(
+            header_value(&resp, "strict-transport-security", path),
+            EXPECTED_HSTS,
+            "{}: wrong HSTS value",
+            path
+        );
+    }
 }

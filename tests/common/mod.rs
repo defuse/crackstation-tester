@@ -168,8 +168,18 @@ pub fn assert_redirect(response: &reqwest::Response, expected_location: &str, co
         .to_str()
         .unwrap_or_else(|_| panic!("{}: invalid Location header value", context));
 
+    // RFC 7231 allows a relative Location, and PHP emits one ("/about-us.htm")
+    // where the Rust server emits an absolute URL. Both send a browser to the same
+    // place, so compare the resolved target rather than the encoding — that keeps
+    // these assertions meaningful against either implementation.
+    let resolved = if location.starts_with('/') {
+        format!("{}{}", origin(), location)
+    } else {
+        location.to_string()
+    };
+
     assert_eq!(
-        location, expected_location,
+        resolved, expected_location,
         "{}: expected redirect to '{}', got '{}'",
         context, expected_location, location
     );
@@ -403,4 +413,85 @@ pub fn results(body: &str) -> Vec<ResultRow> {
             body.chars().take(500).collect::<String>()
         )
     })
+}
+
+// ===== Page metadata parsing =====
+
+/// Site-wide defaults from PHP's URLParse.php ($DEFAULT_TITLE etc). Pages that
+/// declare no title/description/keywords of their own render these.
+pub const DEFAULT_TITLE: &str =
+    "CrackStation - Online Password Hash Cracking - MD5, SHA1, Linux, Rainbow Tables, etc.";
+pub const DEFAULT_DESCRIPTION: &str =
+    "Crackstation is the most effective hash cracking service. We crack: MD5, SHA1, SHA2, WPA, and much more...";
+pub const DEFAULT_KEYWORDS: &str =
+    "md5 cracking, sha1 cracking, hash cracking, password cracking";
+
+/// Decode the HTML entities the templates emit, so assertions compare page text
+/// rather than entity spelling. PHP's htmlspecialchars writes `&#039;` where
+/// Askama writes `&#x27;`; both render as an apostrophe, and the contract is the
+/// text, not the encoding.
+pub fn decode_entities(text: &str) -> String {
+    text.replace("&#x27;", "'")
+        .replace("&#039;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&") // must come last, or earlier output re-decodes
+}
+
+/// The `<head>` metadata of a rendered page, entity-decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageMeta {
+    pub title: String,
+    pub description: String,
+    pub keywords: String,
+}
+
+/// Extract the text between `open` and the next `close`, panicking if absent.
+fn extract_between(body: &str, open: &str, close: &str) -> String {
+    let start = body
+        .find(open)
+        .unwrap_or_else(|| panic!("page is missing {:?}", open))
+        + open.len();
+    let len = body[start..]
+        .find(close)
+        .unwrap_or_else(|| panic!("no {:?} after {:?}", close, open));
+    decode_entities(&body[start..start + len])
+}
+
+/// Parse `<title>`, `<meta name="description">`, and `<meta name="keywords">`.
+pub fn page_meta(body: &str) -> PageMeta {
+    PageMeta {
+        title: extract_between(body, "<title>", "</title>"),
+        description: extract_between(body, "<meta name=\"description\" content=\"", "\""),
+        keywords: extract_between(body, "<meta name=\"keywords\" content=\"", "\""),
+    }
+}
+
+/// Extract the text of the page's single `<h1>`, panicking if there isn't exactly one.
+pub fn h1(body: &str) -> String {
+    let count = body.matches("<h1").count();
+    assert_eq!(count, 1, "expected exactly one <h1> on the page, found {}", count);
+    let start = body.find("<h1").expect("checked above");
+    let text_start = body[start..].find('>').expect("unterminated <h1") + start + 1;
+    let len = body[text_start..]
+        .find("</h1>")
+        .expect("no closing </h1>");
+    decode_entities(&body[text_start..text_start + len])
+}
+
+/// GET a path, assert it returns exactly 200, and return the body.
+pub async fn get_ok(path: &str) -> String {
+    let resp = client()
+        .get(url(path))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("GET {} failed: {}", path, e));
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "GET {} should return exactly 200",
+        path
+    );
+    resp.text().await.expect("response body")
 }
