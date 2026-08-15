@@ -11,9 +11,11 @@
 
 mod common;
 
+use reqwest::header::ORIGIN;
+
 use common::{
     assert_body_contains, assert_body_does_not_contain, assert_success, captcha_bypass_secret,
-    client, is_production_url, parse_results, results, submitted_hashes_textarea, url,
+    client, is_production_url, origin, parse_results, results, submitted_hashes_textarea, url,
     ResultRow,
 };
 
@@ -56,6 +58,7 @@ fn extract_error(body: &str) -> Option<String> {
 async fn crack(hashes: &str) -> String {
     let resp = client()
         .post(url("/"))
+        .header(ORIGIN, origin())
         .header("X-Captcha-Bypass", captcha_bypass_secret())
         .form(&[("hashes", hashes)])
         .send()
@@ -188,6 +191,7 @@ async fn no_captcha_fails() {
     let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let resp = client()
         .post(url("/"))
+        .header(ORIGIN, origin())
         .form(&[("hashes", hash)])
         .send()
         .await
@@ -221,6 +225,7 @@ async fn wrong_bypass_secret_fails() {
     let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let resp = client()
         .post(url("/"))
+        .header(ORIGIN, origin())
         .header("X-Captcha-Bypass", "wrong-secret-value")
         .form(&[("hashes", hash)])
         .send()
@@ -597,4 +602,51 @@ async fn crack_empty_string_returns_empty_plaintext() {
             ResultRow::full(ntlm_empty, "NTLM", ""),
         ]
     );
+}
+
+/// A third-party page can make a visitor's browser POST here. If the server accepted
+/// it, it would report that visitor's IP to Google as a CrackStation submission and
+/// record a hit under their address -- neither of which they did.
+///
+/// CORS headers cannot prevent this: a form POST of application/x-www-form-urlencoded
+/// is a CORS "simple request", so it is delivered and executed regardless of any
+/// Access-Control-Allow-Origin. The refusal has to happen server-side, on Origin.
+#[tokio::test]
+async fn cross_origin_post_is_refused() {
+    for bad_origin in ["https://evil.com", "https://crackstation.net.evil.com"] {
+        let resp = client()
+            .post(url("/"))
+            .header(ORIGIN, bad_origin)
+            .header("X-Captcha-Bypass", captcha_bypass_secret())
+            .form(&[("hashes", "25d55ad283aa400af464c76d713c07ad")])
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "POST from {bad_origin} must be refused"
+        );
+        let body = resp.text().await.expect("body");
+        assert!(
+            !body.contains("12345678"),
+            "a refused cross-origin POST must not return a cracked plaintext"
+        );
+    }
+}
+
+/// A POST carrying no Origin and no Referer is refused too -- there is nothing to
+/// distinguish it from a forged one.
+#[tokio::test]
+async fn post_without_origin_or_referer_is_refused() {
+    let resp = client()
+        .post(url("/"))
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .form(&[("hashes", "25d55ad283aa400af464c76d713c07ad")])
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status().as_u16(), 403);
 }
