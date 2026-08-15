@@ -144,9 +144,7 @@ async fn canonical_urls_are_not_redirected() {
         "/legal-privacy.htm",
         "/downloads.htm",
         "/hashing-security.htm",
-        "/hashing-security-draft.htm",
         "/crackstation-wordlist-password-cracking-dictionary.htm",
-        "/thank-you.htm",
     ] {
         assert_no_redirect(path).await;
     }

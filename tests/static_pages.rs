@@ -120,18 +120,20 @@ async fn hashing_security_page() {
     assert_eq!(h1(&body), "Salted Password Hashing - Doing it Right");
 }
 
-/// The draft shares the published article's metadata in `$PAGE_INFO`.
+/// DIVERGENCE FROM PHP (intentional): the unfinished draft article is gone.
+///
+/// PHP served it at /hashing-security-draft.htm under the *published* article's
+/// title, description and keywords, so search engines saw two URLs claiming to be
+/// the same page and the draft could outrank the finished one. Nothing linked to
+/// it. It is now a 404.
 #[tokio::test]
-async fn hashing_security_draft_page() {
-    let body = get_ok("/hashing-security-draft.htm").await;
-    assert_eq!(
-        page_meta(&body),
-        meta(
-            "Secure Salted Password Hashing - How to do it Properly",
-            "How to hash passwords properly using salt. Why hashes should be salted and how to use salt correctly.",
-            "salt, salted hashing, secure password hashing, password hashing, proper way to hash passwords",
-        )
-    );
+async fn hashing_security_draft_is_gone() {
+    let resp = client()
+        .get(url("/hashing-security-draft.htm"))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status().as_u16(), 404);
 }
 
 #[tokio::test]
@@ -148,16 +150,19 @@ async fn wordlist_page() {
     assert_eq!(h1(&body), "CrackStation's Password Cracking Dictionary");
 }
 
-/// thank-you declares a title and description but no keywords, so keywords fall
-/// through to the site default.
+/// DIVERGENCE FROM PHP (intentional): the thank-you page is gone.
+///
+/// It confirmed a donation that could not have happened -- the flow that once
+/// reached it was removed, and nothing on the site links to it -- so anyone who
+/// found the URL was told "THANKS!" for a purchase they never made.
 #[tokio::test]
-async fn thank_you_page() {
-    let body = get_ok("/thank-you.htm").await;
-    assert_eq!(
-        page_meta(&body),
-        meta("Thanks!", "Donation Confirmation Page", DEFAULT_KEYWORDS)
-    );
-    assert_eq!(h1(&body), "THANKS!");
+async fn thank_you_page_is_gone() {
+    let resp = client()
+        .get(url("/thank-you.htm"))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status().as_u16(), 404);
 }
 
 /// Every page carries the shared navigation and the footer hit counter.
@@ -171,7 +176,6 @@ async fn every_page_has_navigation_and_footer() {
         "/downloads.htm",
         "/hashing-security.htm",
         "/crackstation-wordlist-password-cracking-dictionary.htm",
-        "/thank-you.htm",
     ];
 
     for path in pages {
@@ -205,7 +209,7 @@ async fn recaptcha_only_on_home_page() {
         "home page should load the reCAPTCHA script"
     );
 
-    for path in ["/about-us.htm", "/downloads.htm", "/thank-you.htm"] {
+    for path in ["/about-us.htm", "/downloads.htm", "/contact-us.htm"] {
         let body = get_ok(path).await;
         assert!(
             !body.contains("recaptcha/api.js"),
