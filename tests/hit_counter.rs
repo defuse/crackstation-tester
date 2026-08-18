@@ -113,8 +113,8 @@ async fn hit_counter_bot_not_counted() {
         .build()
         .expect("Failed to create HTTP client");
 
-    // Use the downloads page to avoid race conditions
-    let page_url = url("/downloads.htm");
+    // A page no other hit-counter test touches, to avoid racing them.
+    let page_url = url("/legal-privacy.htm");
 
     // Get current count with normal UA
     let resp1 = client

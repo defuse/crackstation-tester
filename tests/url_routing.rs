@@ -142,7 +142,6 @@ async fn canonical_urls_are_not_redirected() {
         "/about-us.htm",
         "/contact-us.htm",
         "/legal-privacy.htm",
-        "/downloads.htm",
         "/hashing-security.htm",
         "/crackstation-wordlist-password-cracking-dictionary.htm",
     ] {

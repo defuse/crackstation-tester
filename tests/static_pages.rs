@@ -77,33 +77,18 @@ async fn legal_privacy_page() {
     assert_eq!(h1(&body), "CrackStation's Terms of Service and Privacy Policy");
 }
 
-/// downloads.php has no `<h1>`, only `<h3>` section headings.
+/// DIVERGENCE FROM PHP (intentional): the downloads page is gone.
+///
+/// It published four section headings -- HashDB, PHP Cracking Script, Waterfall,
+/// Wordlists -- with nothing under any of them, so it was indexable and empty.
 #[tokio::test]
-async fn downloads_page() {
-    let body = get_ok("/downloads.htm").await;
-    assert_eq!(
-        page_meta(&body),
-        meta(
-            "CrackStation Tools & Downloads",
-            "Free tools & Downloads provided by CrackStation",
-            "hash tools, hash cracking, password cracking",
-        )
-    );
-
-    let sections: Vec<&str> = ["HashDB", "PHP Cracking Script", "Waterfall", "Wordlists"].to_vec();
-    for section in sections {
-        let heading = format!("<h3>{}</h3>", section);
-        assert!(
-            body.contains(&heading),
-            "downloads page should have the {:?} section heading",
-            section
-        );
-    }
-    assert_eq!(
-        body.matches("<h3>").count(),
-        4,
-        "downloads page should have exactly 4 section headings"
-    );
+async fn downloads_page_is_gone() {
+    let resp = client()
+        .get(url("/downloads.htm"))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status().as_u16(), 404);
 }
 
 #[tokio::test]
@@ -173,7 +158,6 @@ async fn every_page_has_navigation_and_footer() {
         "/about-us.htm",
         "/contact-us.htm",
         "/legal-privacy.htm",
-        "/downloads.htm",
         "/hashing-security.htm",
         "/crackstation-wordlist-password-cracking-dictionary.htm",
     ];
@@ -209,7 +193,7 @@ async fn recaptcha_only_on_home_page() {
         "home page should load the reCAPTCHA script"
     );
 
-    for path in ["/about-us.htm", "/downloads.htm", "/contact-us.htm"] {
+    for path in ["/about-us.htm", "/contact-us.htm", "/legal-privacy.htm"] {
         let body = get_ok(path).await;
         assert!(
             !body.contains("recaptcha/api.js"),
