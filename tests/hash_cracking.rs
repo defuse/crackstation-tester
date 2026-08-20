@@ -11,6 +11,10 @@
 
 mod common;
 
+/// md5("monkey"). A near-miss row shows the digest the word really produces, so this
+/// is what the hash column holds whenever a query only matched monkey's md5 prefix.
+const MD5_MONKEY: &str = "d0763edaa9d9bd2a9516280e9044d885";
+
 use reqwest::header::ORIGIN;
 
 use common::{
@@ -336,15 +340,32 @@ async fn prefix_match_partial_results() {
     let sha1_prefix = "ab87d24bdc7452e5000000000000000000000000";
     let sha256_prefix = "000c285457fc971f000000000000000000000000000000000000000000000000";
 
+    // What the rows show is monkey's real digests, not the zero-padded queries.
+    let md5_monkey = "d0763edaa9d9bd2a9516280e9044d885";
+    let sha1_monkey = "ab87d24bdc7452e55738deb5f868e1f16dea5ace";
+    let sha256_monkey = "000c285457fc971f862a79b786476c78812c8897063c6fa9c045f579a3b2d63f";
+
     let body = crack(&[md5_prefix, sha1_prefix, sha256_prefix].join("\n")).await;
 
     assert_eq!(
         results(&body),
         vec![
-            ResultRow::partial(md5_prefix, "md5", "monkey"),
-            ResultRow::partial(sha1_prefix, "sha1", "monkey"),
-            ResultRow::partial(sha256_prefix, "sha256", "monkey"),
+            ResultRow::partial(md5_monkey, "md5", "monkey"),
+            ResultRow::partial(sha1_monkey, "sha1", "monkey"),
+            ResultRow::partial(sha256_monkey, "sha256", "monkey"),
         ]
+    );
+
+    // The zero tails were never part of any digest, so nothing may present them as one.
+    for query in [md5_prefix, sha1_prefix, sha256_prefix] {
+        assert_body_does_not_contain(&body, &format!("<td>{}</td>", query), "near-miss row");
+    }
+
+    // The agreeing head is marked up, and stops exactly where agreement stops.
+    assert_body_contains(
+        &body,
+        "<span class=\"matched\">d0763edaa9d9bd2a</span>9516280e9044d885",
+        "md5 near-miss hash cell",
     );
 }
 
@@ -364,7 +385,7 @@ async fn mixed_full_prefix_not_found_format_error() {
         vec![
             ResultRow::full(md5_hello, "md5", "hello"),
             ResultRow::full(sha1_hello, "sha1", "hello"),
-            ResultRow::partial(md5_prefix, "md5", "monkey"),
+            ResultRow::partial(MD5_MONKEY, "md5", "monkey"),
             ResultRow::not_found(missing),
             ResultRow::bad_format(invalid),
         ]
@@ -394,15 +415,37 @@ async fn mixed_full_prefix_not_found_format_error() {
 #[tokio::test]
 async fn oversized_collision_block_is_capped_and_reports_the_remainder() {
     let lm = "e52cac67419a9a22664345140a852f61";
+    // Each near miss shows its own digest, which is why they are listed with one. They
+    // all open with the 8-byte index prefix the query matched -- that is what put them
+    // in this block -- and diverge immediately after it.
     let near_misses = [
-        "password", "password2", "password3", "password27", "password4", "password28",
-        "password5", "password6", "password7", "password8", "password9", "password10",
-        "password11", "password12", "password13", "password14", "password15",
-        "password16", "password17",
+        ("password", "e52cac67419a9a224a3b108f3fa6cb6d"),
+        ("password2", "e52cac67419a9a22f96f275e1115b16f"),
+        ("password3", "e52cac67419a9a221b087c18752bdbee"),
+        ("password27", "e52cac67419a9a220cb368a39faef9d7"),
+        ("password4", "e52cac67419a9a22ea36bee89599ae2e"),
+        ("password28", "e52cac67419a9a22d5aa77e3275f042e"),
+        ("password5", "e52cac67419a9a22d0dc9a5593688b90"),
+        ("password6", "e52cac67419a9a2210350407506f2c10"),
+        ("password7", "e52cac67419a9a227920c5d817a72d61"),
+        ("password8", "e52cac67419a9a224d41e2e8da27fb93"),
+        ("password9", "e52cac67419a9a22d8de60e979cf6e94"),
+        ("password10", "e52cac67419a9a22feafd86d28195a28"),
+        ("password11", "e52cac67419a9a229e608e4ebc3cd592"),
+        ("password12", "e52cac67419a9a2259abf45f0b8bcbf4"),
+        ("password13", "e52cac67419a9a228a3e58444258f587"),
+        ("password14", "e52cac67419a9a226af988f8bf4db522"),
+        ("password15", "e52cac67419a9a22925ca22cc9cd8696"),
+        ("password16", "e52cac67419a9a2210e407f09da59a20"),
+        ("password17", "e52cac67419a9a225def6facbd14aedb"),
     ];
 
     let expected: Vec<ResultRow> = std::iter::once(ResultRow::full(lm, "LM", "password123"))
-        .chain(near_misses.iter().map(|w| ResultRow::partial(lm, "LM", w)))
+        .chain(
+            near_misses
+                .iter()
+                .map(|(word, hash)| ResultRow::partial(hash, "LM", word)),
+        )
         .chain(std::iter::once(ResultRow::truncated(lm, 10, 30)))
         .collect();
 
@@ -627,7 +670,7 @@ async fn results_preserve_submission_order() {
             ResultRow::bad_format(invalid),
             ResultRow::not_found(missing),
             ResultRow::full(sha1_password, "sha1", "password"),
-            ResultRow::partial(md5_prefix, "md5", "monkey"),
+            ResultRow::partial(MD5_MONKEY, "md5", "monkey"),
         ]
     );
 }

@@ -325,11 +325,16 @@ impl ResultRow {
         }
     }
 
-    /// A yellow row: only the hash prefix matched, so the plaintext is a candidate.
-    pub fn partial(hash: &str, hash_type: &str, plaintext: &str) -> Self {
+    /// A yellow row: only a prefix matched, so the plaintext is a candidate.
+    ///
+    /// The hash column holds the digest *that word actually produces*, not the query —
+    /// the query's wrong tail describes nothing, so the row shows the real hash with
+    /// the agreeing head marked up. `text_of` concatenates across that markup, so the
+    /// value here is the whole digest.
+    pub fn partial(actual_hash: &str, hash_type: &str, plaintext: &str) -> Self {
         Self {
             class: "part".to_string(),
-            hash: hash.to_string(),
+            hash: actual_hash.to_string(),
             hash_type: hash_type.to_string(),
             result: plaintext.to_string(),
         }
