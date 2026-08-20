@@ -371,6 +371,59 @@ async fn mixed_full_prefix_not_found_format_error() {
     );
 }
 
+// ===== Result count limit =====
+
+/// LM's index prefix is DES of the uppercased first seven characters, so every
+/// "password*" word in the dictionary shares one: a query against that block finds one
+/// exact match and 29 near misses, and the table shows 20 with a row for the rest.
+///
+/// The hash queried is LM("password123") for a reason. Entries in a block are visited
+/// in index order, and "password123" sits 26th of the 30 — past the cap — so an
+/// implementation that simply stopped after 20 entries would drop the one row that
+/// answers the question and report the hash as uncracked. Re-derive the order with:
+///
+/// ```text
+/// preimage lookup -a LM -i dev/cracking/lm.idx -d dev/cracking/REALUNIQ.lst \
+///     e52cac67419a9a220000000000000000
+/// ```
+///
+/// The near misses below are therefore the block's first 19 in that order, and pinning
+/// them exactly is what keeps this test honest: if the ordering ever changes so that
+/// "password123" lands inside the cap, this fails rather than quietly passing while
+/// testing nothing.
+#[tokio::test]
+async fn oversized_collision_block_is_capped_and_reports_the_remainder() {
+    let lm = "e52cac67419a9a22664345140a852f61";
+    let near_misses = [
+        "password", "password2", "password3", "password27", "password4", "password28",
+        "password5", "password6", "password7", "password8", "password9", "password10",
+        "password11", "password12", "password13", "password14", "password15",
+        "password16", "password17",
+    ];
+
+    let expected: Vec<ResultRow> = std::iter::once(ResultRow::full(lm, "LM", "password123"))
+        .chain(near_misses.iter().map(|w| ResultRow::partial(lm, "LM", w)))
+        .chain(std::iter::once(ResultRow::truncated(lm, 10, 30)))
+        .collect();
+
+    assert_eq!(results(&crack(lm).await), expected);
+}
+
+/// The limit is spent per submitted hash. A hash that hits the cap must not consume
+/// another hash's rows, and must not put a truncation row on a result set that is
+/// hiding nothing.
+#[tokio::test]
+async fn the_limit_is_spent_per_hash_not_per_request() {
+    let lm = "e52cac67419a9a22664345140a852f61";
+    let md5_hello = "5d41402abc4b2a76b9719d911017c592";
+    let rows = results(&crack(&[lm, md5_hello].join("\n")).await);
+
+    assert_eq!(rows.len(), 22, "21 rows for the capped hash, then 1 for the other");
+    assert_eq!(rows[0], ResultRow::full(lm, "LM", "password123"));
+    assert_eq!(rows[20], ResultRow::truncated(lm, 10, 30));
+    assert_eq!(rows[21], ResultRow::full(md5_hello, "md5", "hello"));
+}
+
 #[tokio::test]
 async fn unrecognized_hash_format() {
     let too_short = "abcdef0123456";

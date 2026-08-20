@@ -354,6 +354,19 @@ impl ResultRow {
             result: "Unrecognized hash format.".to_string(),
         }
     }
+
+    /// A grey row: the hash had more matches than the table will show.
+    ///
+    /// Not a match — it reports the ones being withheld, so the type column is blank
+    /// (a `&nbsp;`, which parses to a non-breaking space and trims away).
+    pub fn truncated(hash: &str, hidden: usize, total: usize) -> Self {
+        Self {
+            class: "more".to_string(),
+            hash: hash.to_string(),
+            hash_type: String::new(),
+            result: format!("{} more not shown (of {} total).", hidden, total),
+        }
+    }
 }
 
 /// Parse the crack results table into rows, in document order.
