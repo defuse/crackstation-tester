@@ -342,6 +342,34 @@ async fn invalid_token_rejected_by_google() {
     );
 }
 
+/// Production's wordlist is assembled from breach dumps, so some words are not valid
+/// UTF-8. The dev list carries `inv\xff\xfeword` for exactly this path.
+///
+/// Rendering those with `from_utf8_lossy` alone put a string that does *not* hash to the
+/// query on a green "exact match" row, with nothing to say a substitution had happened.
+/// The row now shows the exact bytes, which are the real answer and can be copied, with
+/// the lossy form after them.
+#[tokio::test]
+async fn a_plaintext_that_is_not_utf8_is_shown_as_bytes() {
+    let md5 = "3e2a8a4ded081ff3ce11a235d3e22150";
+    let sha1 = "92874f693e663118f8d3c4d6c6b33562fcaf1caa";
+    let shown = "Binary data: 696e76fffe776f7264 (inv\u{fffd}\u{fffd}word)";
+
+    let body = crack(&[md5, sha1].join("\n")).await;
+
+    assert_eq!(
+        results(&body),
+        vec![
+            ResultRow::full(md5, "md5", shown),
+            ResultRow::full(sha1, "sha1", shown),
+        ]
+    );
+
+    // The bytes must reach the page literally; a rendering that only showed the lossy
+    // form would still contain the parenthesised half and pass a weaker assertion.
+    assert_body_contains(&body, "696e76fffe776f7264", "the exact plaintext bytes");
+}
+
 // ===== Request body limit =====
 
 /// Send a form-encoded body of exactly `len` bytes and return the status.
