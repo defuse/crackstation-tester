@@ -19,7 +19,8 @@ use reqwest::header::ORIGIN;
 
 use common::{
     assert_body_contains, assert_body_does_not_contain, assert_success, captcha_bypass_secret,
-    client, origin, parse_results, results, submitted_hashes_textarea, url,
+    client, is_production_url, origin, parse_results, results, submitted_hashes_textarea,
+    url,
     ResultRow,
 };
 
@@ -33,9 +34,49 @@ use common::{
 // the two tests below run everywhere.
 //
 // Still not verifiable in dev: rejection of a token that is present and plausibly
-// sized but wrong. The test secret accepts those, so a test asserting that rejection
-// would pass in production and silently verify nothing locally. Such a test needs a
-// guard on `is_production_url()`; there is none today.
+// sized but wrong. The test secret accepts those, so only a server holding a real
+// secret can refuse one, and only by asking Google. `invalid_token_rejected_by_google`
+// covers it, guarded by `require_captcha_enforcement`.
+
+/// Guard for tests whose verdict can only come from Google.
+///
+/// `dev/dotenv-example` sets `RECAPTCHA_SECRET_KEY` to Google's published test secret,
+/// which validates any token it is *given*. Absent and oversized tokens never reach it
+/// -- the server refuses those locally -- so those rejections are testable anywhere.
+/// A token that is present, plausibly sized and simply wrong is not: the test secret
+/// accepts it, so asserting its rejection against a dev server would verify nothing.
+///
+/// Such tests are marked `#[ignore]`, so a default run reports them as ignored rather
+/// than counting them as passes. Run them with:
+///
+/// ```text
+/// CRACKSTATION_URL=https://crackstation.net cargo test -- --include-ignored
+/// ```
+///
+/// If one is force-included against a server that cannot reject, fail loudly rather
+/// than reporting a pass that verified nothing.
+fn require_captcha_enforcement(test_name: &str) {
+    assert!(
+        is_production_url(),
+        "{} needs a server holding a real reCAPTCHA secret, but CRACKSTATION_URL points at a \
+         dev server using Google's always-pass test secret — it accepts any token that reaches \
+         it, so this test would verify nothing. Point CRACKSTATION_URL at production.",
+        test_name
+    );
+}
+
+/// A token shaped like a real reCAPTCHA v2 response but not issued by Google.
+///
+/// Length and alphabet matter: the server refuses an absent or oversized token locally,
+/// without an outbound request, and such a refusal would produce the same page as a
+/// genuine rejection. Staying inside the range the server relays is what makes the
+/// verdict Google's rather than the server's own.
+fn plausible_but_invalid_token() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    (0..800)
+        .map(|i| ALPHABET[(i * 7 + 13) % ALPHABET.len()] as char)
+        .collect()
+}
 
 /// Extract the red error message shown above the results, if any.
 fn extract_error(body: &str) -> Option<String> {
@@ -247,6 +288,58 @@ async fn submitted_hashes_echoed_back() {
     let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let body = crack(hash).await;
     assert_eq!(submitted_hashes_textarea(&body), hash);
+}
+
+/// The one captcha test whose verdict comes from Google.
+///
+/// A token that is present and plausibly sized passes the server's local checks and is
+/// relayed to `siteverify`, which rejects it because Google never issued it. That path
+/// -- outbound request, real secret, real answer -- is exercised by nothing else:
+/// `no_captcha_fails` and `wrong_bypass_secret_fails` are both refused locally.
+///
+/// Asserting the exact message matters. "Could not verify captcha (server error)" is
+/// the *other* rejection the page can show, and it means the request never completed;
+/// accepting it here would let a network failure masquerade as a passing test.
+#[tokio::test]
+#[ignore = "needs a server with a real reCAPTCHA secret; see require_captcha_enforcement"]
+async fn invalid_token_rejected_by_google() {
+    require_captcha_enforcement("invalid_token_rejected_by_google");
+
+    let token = plausible_but_invalid_token();
+    assert!(
+        (500..=2000).contains(&token.len()),
+        "token must sit inside the range the server relays ({} bytes), or it is refused \
+         locally and Google is never asked",
+        token.len()
+    );
+
+    let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
+    let resp = client()
+        .post(url("/"))
+        .header(ORIGIN, origin())
+        .form(&[("hashes", hash), ("g-recaptcha-response", token.as_str())])
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_success(&resp, "invalid captcha token");
+    let body = resp.text().await.expect("response body");
+
+    assert_eq!(
+        extract_error(&body).as_deref(),
+        Some("Incorrect captcha. Please try again."),
+        "expected Google's verdict; a server-error message would mean the round trip failed"
+    );
+    assert_eq!(
+        parse_results(&body),
+        None,
+        "a captcha failure must not crack anything"
+    );
+    assert_eq!(
+        submitted_hashes_textarea(&body),
+        hash,
+        "textarea should be repopulated with the submitted hash"
+    );
 }
 
 // ===== Algorithm coverage =====
