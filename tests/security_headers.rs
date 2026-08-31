@@ -135,6 +135,66 @@ async fn hsts_absent_on_dev_host() {
     }
 }
 
+/// `includeSubDomains` is a promise about every subdomain, and `www` is the one this
+/// site actually serves. If the apex sends HSTS and `www` does not, the policy is
+/// inconsistent with what the apex asserts.
+#[tokio::test]
+#[ignore = "needs an HTTPS production host; run with CRACKSTATION_URL=https://crackstation.net -- --include-ignored"]
+async fn hsts_present_on_www_in_production() {
+    assert!(
+        is_production_url(),
+        "hsts_present_on_www_in_production requires CRACKSTATION_URL to point at production"
+    );
+
+    let resp = client()
+        .get("https://www.crackstation.net/")
+        .send()
+        .await
+        .expect("request to www failed");
+
+    assert_eq!(
+        header_value(&resp, "strict-transport-security", "www"),
+        EXPECTED_HSTS,
+        "www must carry the same HSTS policy the apex claims for its subdomains"
+    );
+}
+
+/// The other half of preload eligibility: plain HTTP must redirect to HTTPS on the same
+/// host. HSTS being present says nothing about this, and losing it is the same kind of
+/// silent, slow-to-reverse removal from the preload list.
+#[tokio::test]
+#[ignore = "needs a production host; run with CRACKSTATION_URL=https://crackstation.net -- --include-ignored"]
+async fn http_redirects_to_https_in_production() {
+    assert!(
+        is_production_url(),
+        "http_redirects_to_https_in_production requires CRACKSTATION_URL to point at production"
+    );
+
+    let resp = client()
+        .get("http://crackstation.net/")
+        .send()
+        .await
+        .expect("plain-HTTP request failed");
+
+    assert!(
+        resp.status().is_redirection(),
+        "plain HTTP must redirect, got {}",
+        resp.status()
+    );
+
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("a redirect must carry Location")
+        .to_str()
+        .expect("Location must be text");
+
+    assert!(
+        location.starts_with("https://"),
+        "plain HTTP must redirect to HTTPS, got {location}"
+    );
+}
+
 /// HSTS is only emitted over HTTPS from a non-dev host, so this needs production.
 #[tokio::test]
 #[ignore = "needs an HTTPS production host; run with CRACKSTATION_URL=https://crackstation.net -- --include-ignored"]
