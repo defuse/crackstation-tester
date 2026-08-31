@@ -19,32 +19,23 @@ use reqwest::header::ORIGIN;
 
 use common::{
     assert_body_contains, assert_body_does_not_contain, assert_success, captcha_bypass_secret,
-    client, is_production_url, origin, parse_results, results, submitted_hashes_textarea, url,
+    client, origin, parse_results, results, submitted_hashes_textarea, url,
     ResultRow,
 };
 
-/// Captcha *rejection* is unreachable in dev: `dev/dotenv-example` sets
-/// `RECAPTCHA_SECRET_KEY` to Google's test secret, which validates any token —
-/// including an absent one — so a captcha-less POST still cracks successfully.
-///
-/// Tests needing a real rejection are therefore marked `#[ignore]`, so a default run
-/// reports them under "ignored" rather than counting them as passes. Run them with:
-///
-/// ```text
-/// CRACKSTATION_URL=https://crackstation.net cargo test -- --include-ignored
-/// ```
-///
-/// If one is force-included against a server that cannot reject, fail loudly rather
-/// than reporting a pass that verified nothing.
-fn require_captcha_enforcement(test_name: &str) {
-    assert!(
-        is_production_url(),
-        "{} requires a server that actually rejects captchas, but CRACKSTATION_URL points at \
-         a dev server using Google's always-pass test secret — captcha rejection cannot occur \
-         there, so this test would verify nothing. Point CRACKSTATION_URL at production.",
-        test_name
-    );
-}
+// What is and is not verifiable against a dev server, since it decides which captcha
+// tests can run anywhere:
+//
+// `dev/dotenv-example` sets `RECAPTCHA_SECRET_KEY` to Google's test secret, which
+// validates any token it is *given*. But the server no longer asks Google about every
+// token: an absent or implausibly long one is rejected locally, before any outbound
+// request. So a captcha-less POST is refused identically in dev and in production, and
+// the two tests below run everywhere.
+//
+// Still not verifiable in dev: rejection of a token that is present and plausibly
+// sized but wrong. The test secret accepts those, so a test asserting that rejection
+// would pass in production and silently verify nothing locally. Such a test needs a
+// guard on `is_production_url()`; there is none today.
 
 /// Extract the red error message shown above the results, if any.
 fn extract_error(body: &str) -> Option<String> {
@@ -189,9 +180,7 @@ async fn results_table_structure() {
 /// A POST with no captcha token must be rejected outright: an error, no results,
 /// and the submitted hashes preserved so the user does not have to retype them.
 #[tokio::test]
-#[ignore = "needs a server that enforces captcha; see require_captcha_enforcement"]
 async fn no_captcha_fails() {
-    require_captcha_enforcement("no_captcha_fails");
     let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let resp = client()
         .post(url("/"))
@@ -223,9 +212,7 @@ async fn no_captcha_fails() {
 /// A wrong bypass secret must not grant bypass — the request falls through to real
 /// captcha verification and is rejected.
 #[tokio::test]
-#[ignore = "needs a server that enforces captcha; see require_captcha_enforcement"]
 async fn wrong_bypass_secret_fails() {
-    require_captcha_enforcement("wrong_bypass_secret_fails");
     let hash = "5f4dcc3b5aa765d61d8327deb882cf99";
     let resp = client()
         .post(url("/"))
