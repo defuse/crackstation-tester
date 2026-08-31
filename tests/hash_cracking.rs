@@ -15,7 +15,7 @@ mod common;
 /// is what the hash column holds whenever a query only matched monkey's md5 prefix.
 const MD5_MONKEY: &str = "d0763edaa9d9bd2a9516280e9044d885";
 
-use reqwest::header::ORIGIN;
+use reqwest::header::{CONTENT_TYPE, ORIGIN};
 
 use common::{
     assert_body_contains, assert_body_does_not_contain, assert_success, captcha_bypass_secret,
@@ -340,6 +340,50 @@ async fn invalid_token_rejected_by_google() {
         hash,
         "textarea should be repopulated with the submitted hash"
     );
+}
+
+// ===== Request body limit =====
+
+/// Send a form-encoded body of exactly `len` bytes and return the status.
+async fn post_body_of(len: usize) -> u16 {
+    let mut body = String::from("hashes=");
+    while body.len() < len {
+        body.push_str("a&");
+    }
+    body.truncate(len);
+
+    client()
+        .post(url("/"))
+        .header(ORIGIN, origin())
+        .header("X-Captcha-Bypass", captcha_bypass_secret())
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("request failed")
+        .status()
+        .as_u16()
+}
+
+/// The body cap exists because of what the handler builds from a body, not the body
+/// itself: `form_urlencoded::parse(..).collect()` produces 64 bytes of `Vec` per pair,
+/// and the densest input expressible is the two-byte `a&`. Measured against the old
+/// 100 MB cap, a 10 MB body of exactly this shape drove the server's peak RSS from
+/// 17 MB to 267 MB; under the current cap the same body is refused unread.
+#[tokio::test]
+async fn an_oversized_body_is_refused() {
+    assert_eq!(
+        post_body_of(400 * 1024).await,
+        413,
+        "a body over the cap must be refused, and with the status that says why"
+    );
+}
+
+/// The cap must stay clear of anything the form can legitimately send, or the fix
+/// would break real submissions rather than the attack.
+#[tokio::test]
+async fn a_body_within_the_cap_is_accepted() {
+    assert_eq!(post_body_of(120 * 1024).await, 200);
 }
 
 // ===== Algorithm coverage =====
