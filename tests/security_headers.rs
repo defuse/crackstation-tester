@@ -18,6 +18,20 @@ const EXPECTED_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
 const EXPECTED_HSTS: &str = "max-age=31536000; includeSubDomains; preload";
 
 /// Paths covering each routing path: dynamic page, static CSS, static image.
+/// The exact policy the server must send. Asserted in full rather than by substring:
+/// a directive silently dropped from the middle is exactly the failure this catches, and
+/// the reCAPTCHA entries are the ones whose loss breaks hash cracking outright.
+const EXPECTED_CSP: &str = "default-src 'none'; \
+script-src 'self' https://www.google.com https://www.gstatic.com; \
+style-src 'self' 'unsafe-inline'; \
+img-src 'self' data: https://www.google.com https://www.gstatic.com; \
+font-src 'self'; \
+connect-src 'self' https://www.google.com; \
+frame-src https://www.google.com; \
+form-action 'self'; \
+base-uri 'none'; \
+frame-ancestors 'self'";
+
 const TEST_PATHS: &[&str] = &[
     "/",
     "/about-us.htm",
@@ -215,4 +229,50 @@ async fn hsts_exact_value_in_production() {
             path
         );
     }
+}
+
+/// Every response carries the policy, static assets included.
+#[tokio::test]
+async fn content_security_policy_is_sent_on_every_path() {
+    for path in TEST_PATHS {
+        let resp = client().get(url(path)).send().await.unwrap();
+        assert_eq!(
+            header_value(&resp, "content-security-policy", path),
+            EXPECTED_CSP,
+            "{}: wrong Content-Security-Policy",
+            path
+        );
+    }
+}
+
+/// The policy forbids inline script, so an inline block anywhere on the home page would
+/// simply not run -- silently. The reCAPTCHA callbacks used to live in one, and moving
+/// them to /js/home.js is what lets script-src stay 'self'.
+#[tokio::test]
+async fn the_home_page_has_no_inline_script_and_its_script_file_loads() {
+    let body = client()
+        .get(url("/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        !body.contains("<script>"),
+        "an inline <script> would be blocked by the CSP and never run"
+    );
+    assert!(
+        body.contains(r#"<script src="/js/home.js">"#),
+        "the home page must load its callbacks from a file"
+    );
+
+    let resp = client().get(url("/js/home.js")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "/js/home.js must be served");
+    let js = resp.text().await.unwrap();
+    assert!(
+        js.contains("onRecaptchaChecked") && js.contains("onRecaptchaExpired"),
+        "both callbacks Google calls by name must be present"
+    );
 }
