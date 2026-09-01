@@ -131,6 +131,99 @@ async fn content_type_is_exact_per_path() {
     }
 }
 
+/// Every response carrying a body declares its own type, and the charset is spelled
+/// out wherever the type is text -- an HTML page without `charset=utf-8` renders the
+/// site's non-ASCII content as mojibake in a browser that guesses latin-1.
+///
+/// The producer of the body is what sets each of these: askama for the templates,
+/// axum for the `(StatusCode, &str)` responses, ServeDir for files. Nothing in the
+/// middleware supplies a default, which is what keeps the bodyless statuses below
+/// clean.
+#[tokio::test]
+async fn responses_with_a_body_declare_their_own_content_type() {
+    for (context, resp) in [
+        ("home page", client().get(url("/")).send().await.unwrap()),
+        (
+            "static css",
+            client().get(url("/css/main.css")).send().await.unwrap(),
+        ),
+        (
+            "404 page",
+            client().get(url("/no-such-page.htm")).send().await.unwrap(),
+        ),
+        (
+            "405 text",
+            client().post(url("/about-us.htm")).send().await.unwrap(),
+        ),
+    ] {
+        let expected = match context {
+            "static css" => "text/css",
+            "405 text" => "text/plain; charset=utf-8",
+            _ => "text/html; charset=utf-8",
+        };
+        assert_eq!(
+            header_value(&resp, "content-type", context),
+            expected,
+            "{}: wrong Content-Type",
+            context
+        );
+    }
+}
+
+/// A response with no representation must not claim to have one.
+///
+/// `SecurityHeadersLayer` used to insert `text/html; charset=utf-8` on any response
+/// that lacked a Content-Type, and the only responses that lack one are these -- so a
+/// 304 for a stylesheet told the cache its stored `text/css` had become HTML, which
+/// RFC 9110 5.4.5 forbids. The three baseline security headers must still be present,
+/// so this pins the removal of one header rather than the removal of the layer.
+#[tokio::test]
+async fn bodyless_responses_carry_no_content_type() {
+    // 301 from URL canonicalization: /index.htm is an alias for /.
+    let moved = client().get(url("/index.htm")).send().await.unwrap();
+    assert_eq!(moved.status().as_u16(), 301);
+    assert_eq!(moved.headers().get("content-type"), None, "301 redirect");
+    assert_baseline_headers(&moved, "301 redirect");
+
+    // 307 from ServeDir: a directory requested without its trailing slash.
+    let dir = client().get(url("/css")).send().await.unwrap();
+    assert_eq!(dir.status().as_u16(), 307);
+    assert_eq!(dir.headers().get("content-type"), None, "307 directory");
+    assert_baseline_headers(&dir, "307 directory");
+
+    // 304 from ServeDir, conditioned on the Last-Modified it just sent.
+    let fresh = client().get(url("/css/main.css")).send().await.unwrap();
+    let last_modified = header_value(&fresh, "last-modified", "css last-modified");
+    let not_modified = client()
+        .get(url("/css/main.css"))
+        .header("If-Modified-Since", &last_modified)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_modified.status().as_u16(), 304);
+    assert_eq!(
+        not_modified.headers().get("content-type"),
+        None,
+        "304 not modified"
+    );
+    assert_baseline_headers(&not_modified, "304 not modified");
+
+    // 412 from ServeDir, on a precondition that cannot hold.
+    let precondition_failed = client()
+        .get(url("/css/main.css"))
+        .header("If-Unmodified-Since", "Mon, 01 Jan 1990 00:00:00 GMT")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(precondition_failed.status().as_u16(), 412);
+    assert_eq!(
+        precondition_failed.headers().get("content-type"),
+        None,
+        "412 precondition failed"
+    );
+    assert_baseline_headers(&precondition_failed, "412 precondition failed");
+}
+
 /// HSTS must NOT be sent from a dev host, or a developer's browser would pin
 /// localhost to HTTPS and lock them out of the plain-HTTP dev server.
 #[tokio::test]
