@@ -374,6 +374,44 @@ impl ResultRow {
     }
 }
 
+/// The server shows at most this many match rows per submitted hash, then a `more` row.
+pub const RESULT_LIMIT: usize = 20;
+
+/// Split a `more` row into (hidden, total).
+///
+/// Parsed rather than compared to a fixed string because the counts are a property of
+/// the wordlist, while the arithmetic relating them is a property of the server.
+pub fn truncation_counts(row: &ResultRow) -> (usize, usize) {
+    assert_eq!(row.class, "more", "not a truncation row: {:?}", row);
+    let (hidden, total) = row
+        .result
+        .strip_suffix(" total).")
+        .and_then(|rest| rest.split_once(" more not shown (of "))
+        .unwrap_or_else(|| panic!("malformed truncation row: {:?}", row.result));
+    (
+        hidden.parse().expect("hidden count must be a number"),
+        total.parse().expect("total count must be a number"),
+    )
+}
+
+/// Collapse runs of identical rows into one.
+///
+/// A word present in both the small and the huge table for an algorithm is found twice
+/// and rendered twice, identically, because the type column shows the algorithm name
+/// rather than the table label. That is real behaviour -- PHP's early exit only fires on
+/// a full match, so it searches both tables for a prefix query too -- and it depends on
+/// which wordlist is loaded. Tests asserting row *sequence* collapse the repeats;
+/// `a_word_in_both_tables_is_listed_once_per_table` pins the duplication itself.
+pub fn collapse_repeats(rows: Vec<ResultRow>) -> Vec<ResultRow> {
+    let mut collapsed: Vec<ResultRow> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if collapsed.last() != Some(&row) {
+            collapsed.push(row);
+        }
+    }
+    collapsed
+}
+
 /// Parse the crack results table into rows, in document order.
 ///
 /// Returns `None` when the page has no results table at all — a GET, or a POST

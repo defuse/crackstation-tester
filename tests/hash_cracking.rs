@@ -19,9 +19,8 @@ use reqwest::header::{CONTENT_TYPE, ORIGIN};
 
 use common::{
     assert_body_contains, assert_body_does_not_contain, assert_success, captcha_bypass_secret,
-    client, is_production_url, origin, parse_results, results, submitted_hashes_textarea,
-    url,
-    ResultRow,
+    client, collapse_repeats, is_production_url, origin, parse_results, results,
+    submitted_hashes_textarea, truncation_counts, url, ResultRow, RESULT_LIMIT,
 };
 
 // What is and is not verifiable against a dev server, since it decides which captcha
@@ -63,6 +62,26 @@ fn require_captcha_enforcement(test_name: &str) {
          it, so this test would verify nothing. Point CRACKSTATION_URL at production.",
         test_name
     );
+}
+
+/// Whether the target is the dev server, whose `dev/cracking` fixture is the only place
+/// a specific crafted word is known to exist.
+///
+/// Used by the one test that cannot be written wordlist-independently: rendering a
+/// non-UTF-8 plaintext needs a word made of invalid UTF-8, and there is no way to find
+/// one in a 1.2-billion-word production list without scanning it. Every other test here
+/// asserts a property of the server rather than the contents of a dictionary, and runs
+/// against both.
+fn dev_fixture_only(test_name: &str) -> bool {
+    if is_production_url() {
+        eprintln!(
+            "SKIP {}: needs the crafted non-UTF-8 entry in dev/cracking, which exists in \
+             no production wordlist that can be located by hash.",
+            test_name
+        );
+        return false;
+    }
+    true
 }
 
 /// A token shaped like a real reCAPTCHA v2 response but not issued by Google.
@@ -351,6 +370,9 @@ async fn invalid_token_rejected_by_google() {
 /// the lossy form after them.
 #[tokio::test]
 async fn a_plaintext_that_is_not_utf8_is_shown_as_bytes() {
+    if !dev_fixture_only("a_plaintext_that_is_not_utf8_is_shown_as_bytes") {
+        return;
+    }
     let md5 = "3e2a8a4ded081ff3ce11a235d3e22150";
     let sha1 = "92874f693e663118f8d3c4d6c6b33562fcaf1caa";
     let shown = "Binary data: 696e76fffe776f7264 (inv\u{fffd}\u{fffd}word)";
@@ -443,12 +465,17 @@ async fn crack_all_hash_types() {
     .join("\n");
     let body = crack(&hashes).await;
 
+    let rows = results(&body);
+
+    // LM is case-insensitive, so how many rows it produces is a property of the
+    // wordlist: three in dev, thirty-two in production. Split them off and check the
+    // property; the other fourteen algorithms each owe exactly one row.
+    let (lm_rows, others): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.hash == lm);
+    assert_lm_rows_are_case_variants_of(&lm_rows, "HELLO");
+
     assert_eq!(
-        results(&body),
+        others,
         vec![
-            ResultRow::full(lm, "LM", "hello"),
-            ResultRow::full(lm, "LM", "Hello"),
-            ResultRow::full(lm, "LM", "HELLO"),
             ResultRow::full(ntlm, "NTLM", "hello"),
             ResultRow::full(mysql, "MySQL4.1+", "hello"),
             ResultRow::full(md5md5, "md5(md5)", "hello"),
@@ -463,23 +490,80 @@ async fn crack_all_hash_types() {
             ResultRow::full(whirlpool, "whirlpool", "hello"),
             ResultRow::full(ripemd160, "ripemd160", "hello"),
             ResultRow::full(qubes, "QubesV3.1BackupDefaults", "hello"),
-        ]
+        ],
+        "every algorithm but LM owes exactly one row -- one per algorithm also proves \
+         the full-match short circuit, since md5 and sha1 would otherwise be found a \
+         second time in their huge tables"
     );
 }
 
-/// LM uppercases before hashing, so all three case variants share one hash.
+/// Assert a set of LM rows is exactly the case spellings of one word.
+///
+/// How many spellings the dictionary holds is not the server's business; that they all
+/// uppercase to the same string, all count as full matches, and number more than one is.
+fn assert_lm_rows_are_case_variants_of(rows: &[ResultRow], upper: &str) {
+    let (shown, truncation): (Vec<_>, Vec<_>) = rows.iter().partition(|row| row.class != "more");
+
+    assert!(
+        shown.len() >= 2,
+        "LM is case-insensitive, so at least two spellings must be found, got {:?}",
+        shown
+    );
+    for row in &shown {
+        assert_eq!(
+            row.class, "suc",
+            "an LM case variant is a full match: {:?}",
+            row
+        );
+        assert_eq!(row.hash_type, "LM", "wrong algorithm: {:?}", row);
+        assert_eq!(
+            row.result.to_uppercase(),
+            upper,
+            "every LM match must uppercase to the queried word: {:?}",
+            row
+        );
+    }
+
+    let distinct: std::collections::BTreeSet<_> = shown.iter().map(|r| &r.result).collect();
+    assert_eq!(
+        distinct.len(),
+        shown.len(),
+        "the same spelling must not be listed twice: {:?}",
+        shown
+    );
+
+    if let Some(more) = truncation.first() {
+        let (hidden, total) = truncation_counts(more);
+        assert_eq!(
+            shown.len(),
+            RESULT_LIMIT,
+            "a capped hash shows exactly the limit"
+        );
+        assert_eq!(
+            hidden,
+            total - RESULT_LIMIT,
+            "hidden must be total minus shown"
+        );
+    }
+}
+
+/// LM uppercases before hashing, so every case spelling of a word shares one hash and
+/// all of them come back. Which spellings exist is the dictionary's business -- three in
+/// dev, thirty-two in production -- so this asserts the relationship between them.
 #[tokio::test]
 async fn lm_case_insensitive_matches() {
     let lm = "fda95fbeca288d44aad3b435b51404ee";
-    let body = crack(lm).await;
-    assert_eq!(
-        results(&body),
-        vec![
-            ResultRow::full(lm, "LM", "hello"),
-            ResultRow::full(lm, "LM", "Hello"),
-            ResultRow::full(lm, "LM", "HELLO"),
-        ]
-    );
+    let rows = results(&crack(lm).await);
+
+    assert!(!rows.is_empty(), "LM(hello) must crack");
+    for row in &rows {
+        assert_eq!(
+            row.hash, lm,
+            "every row answers the submitted hash: {:?}",
+            row
+        );
+    }
+    assert_lm_rows_are_case_variants_of(&rows, "HELLO");
 }
 
 // ===== Prefix and mixed results =====
@@ -499,8 +583,20 @@ async fn prefix_match_partial_results() {
 
     let body = crack(&[md5_prefix, sha1_prefix, sha256_prefix].join("\n")).await;
 
+    let rows = results(&body);
+
+    // A prefix query may never be reported as a full match, whatever the wordlist holds.
+    for row in &rows {
+        assert_eq!(
+            row.class, "part",
+            "a query matching only a prefix must be yellow, never green: {:?}",
+            row
+        );
+    }
+
+    // Repeats appear when a word is in both an algorithm's small and huge table.
     assert_eq!(
-        results(&body),
+        collapse_repeats(rows),
         vec![
             ResultRow::partial(md5_monkey, "md5", "monkey"),
             ResultRow::partial(sha1_monkey, "sha1", "monkey"),
@@ -533,7 +629,7 @@ async fn mixed_full_prefix_not_found_format_error() {
     let body = crack(&[md5_hello, sha1_hello, md5_prefix, missing, invalid].join("\n")).await;
 
     assert_eq!(
-        results(&body),
+        collapse_repeats(results(&body)),
         vec![
             ResultRow::full(md5_hello, "md5", "hello"),
             ResultRow::full(sha1_hello, "sha1", "hello"),
@@ -570,38 +666,61 @@ async fn oversized_collision_block_is_capped_and_reports_the_remainder() {
     // Each near miss shows its own digest, which is why they are listed with one. They
     // all open with the 8-byte index prefix the query matched -- that is what put them
     // in this block -- and diverge immediately after it.
-    let near_misses = [
-        ("password", "e52cac67419a9a224a3b108f3fa6cb6d"),
-        ("password2", "e52cac67419a9a22f96f275e1115b16f"),
-        ("password3", "e52cac67419a9a221b087c18752bdbee"),
-        ("password27", "e52cac67419a9a220cb368a39faef9d7"),
-        ("password4", "e52cac67419a9a22ea36bee89599ae2e"),
-        ("password28", "e52cac67419a9a22d5aa77e3275f042e"),
-        ("password5", "e52cac67419a9a22d0dc9a5593688b90"),
-        ("password6", "e52cac67419a9a2210350407506f2c10"),
-        ("password7", "e52cac67419a9a227920c5d817a72d61"),
-        ("password8", "e52cac67419a9a224d41e2e8da27fb93"),
-        ("password9", "e52cac67419a9a22d8de60e979cf6e94"),
-        ("password10", "e52cac67419a9a22feafd86d28195a28"),
-        ("password11", "e52cac67419a9a229e608e4ebc3cd592"),
-        ("password12", "e52cac67419a9a2259abf45f0b8bcbf4"),
-        ("password13", "e52cac67419a9a228a3e58444258f587"),
-        ("password14", "e52cac67419a9a226af988f8bf4db522"),
-        ("password15", "e52cac67419a9a22925ca22cc9cd8696"),
-        ("password16", "e52cac67419a9a2210e407f09da59a20"),
-        ("password17", "e52cac67419a9a225def6facbd14aedb"),
-    ];
+    let rows = results(&crack(lm).await);
+    assert_capped_block(&rows, "e52cac67419a9a22", "PASSWORD123");
+}
 
-    let expected: Vec<ResultRow> = std::iter::once(ResultRow::full(lm, "LM", "password123"))
-        .chain(
-            near_misses
-                .iter()
-                .map(|(word, hash)| ResultRow::partial(hash, "LM", word)),
-        )
-        .chain(std::iter::once(ResultRow::truncated(lm, 10, 30)))
-        .collect();
+/// Assert a capped result set for one hash: the limit of rows, then a `more` row whose
+/// counts add up, with the exact match present among the rows shown.
+///
+/// The last part is the point. Entries in a collision block are visited in index order
+/// and the exact match need not be near the front -- it is 26th of 30 in dev and further
+/// back in production -- so an implementation that simply stopped after the first
+/// `RESULT_LIMIT` entries would drop the one row that answers the question and report
+/// the hash as uncracked. What is asserted is that it survives the cap, not where the
+/// dictionary happens to put it.
+fn assert_capped_block(rows: &[ResultRow], index_prefix: &str, upper: &str) {
+    let (more, shown) = rows.split_last().expect("a capped hash must produce rows");
 
-    assert_eq!(results(&crack(lm).await), expected);
+    let (hidden, total) = truncation_counts(more);
+    assert_eq!(
+        shown.len(),
+        RESULT_LIMIT,
+        "a capped hash shows exactly the limit"
+    );
+    assert_eq!(
+        hidden,
+        total - RESULT_LIMIT,
+        "hidden must be total minus shown"
+    );
+    assert!(
+        total > RESULT_LIMIT,
+        "nothing was truncated, so this tests nothing"
+    );
+
+    let exact: Vec<_> = shown.iter().filter(|row| row.class == "suc").collect();
+    assert_eq!(
+        exact.len(),
+        1,
+        "the one exact match must survive the cap, wherever it sits in index order: {:?}",
+        shown
+    );
+    assert_eq!(
+        exact[0].result.to_uppercase(),
+        upper,
+        "wrong plaintext: {:?}",
+        exact[0]
+    );
+
+    for row in shown.iter().filter(|row| row.class != "suc") {
+        assert_eq!(row.class, "part", "a near miss is yellow: {:?}", row);
+        assert!(
+            row.hash.starts_with(index_prefix),
+            "a near miss is in this block because it shares the index prefix {}: {:?}",
+            index_prefix,
+            row
+        );
+    }
 }
 
 /// The limit is spent per submitted hash. A hash that hits the cap must not consume
@@ -613,10 +732,17 @@ async fn the_limit_is_spent_per_hash_not_per_request() {
     let md5_hello = "5d41402abc4b2a76b9719d911017c592";
     let rows = results(&crack(&[lm, md5_hello].join("\n")).await);
 
-    assert_eq!(rows.len(), 22, "21 rows for the capped hash, then 1 for the other");
-    assert_eq!(rows[0], ResultRow::full(lm, "LM", "password123"));
-    assert_eq!(rows[20], ResultRow::truncated(lm, 10, 30));
-    assert_eq!(rows[21], ResultRow::full(md5_hello, "md5", "hello"));
+    assert_eq!(
+        rows.len(),
+        RESULT_LIMIT + 2,
+        "the limit plus a truncation row for the capped hash, then one for the other"
+    );
+    assert_capped_block(&rows[..=RESULT_LIMIT], "e52cac67419a9a22", "PASSWORD123");
+    assert_eq!(
+        rows[RESULT_LIMIT + 1],
+        ResultRow::full(md5_hello, "md5", "hello"),
+        "the second hash gets its own budget and no truncation row"
+    );
 }
 
 #[tokio::test]
@@ -676,6 +802,16 @@ async fn word_only_in_small_dictionary() {
 /// "hello" is in both dictionaries. Exact whole-table equality is what proves the
 /// early-exit dedup works: a duplicate row from the huge table would be an extra
 /// element and fail the comparison.
+///
+/// This holds on any wordlist, because the early exit is unconditional once a *full*
+/// match is found -- the port reproduces PHP's `break 2` in CrackHashes.php, whose own
+/// comment gives avoiding md5/md5-huge duplication as the reason.
+///
+/// A *prefix* match is the opposite case and deliberately so: no full match means no
+/// early exit, so every table is searched and a word in two of them is listed twice.
+/// PHP does the same. That is why the row-sequence tests above call `collapse_repeats`
+/// -- whether the two dictionaries overlap on a given word is a property of the
+/// wordlist, and they do not overlap on `monkey` in dev but do in production.
 #[tokio::test]
 async fn word_in_both_dictionaries_no_duplicate() {
     let md5_hello = "5d41402abc4b2a76b9719d911017c592";
@@ -816,7 +952,7 @@ async fn results_preserve_submission_order() {
     let body = crack(&[md5_hello, invalid, missing, sha1_password, md5_prefix].join("\n")).await;
 
     assert_eq!(
-        results(&body),
+        collapse_repeats(results(&body)),
         vec![
             ResultRow::full(md5_hello, "md5", "hello"),
             ResultRow::bad_format(invalid),

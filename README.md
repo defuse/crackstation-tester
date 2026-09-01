@@ -1,5 +1,10 @@
 # crackstation-tester
 
+> **This test suite was written with heavy assistance from AI tools and has not been
+> reviewed by a human.** Weigh what it tells you accordingly: a passing run is evidence,
+> not proof, and a test asserting the wrong thing passes just as loudly as one asserting
+> the right thing.
+
 Black-box integration tests for crackstation.net. They drive a running server over HTTP
 and assert on what it actually returns, so they work equally against a dev server and
 against production.
@@ -51,6 +56,33 @@ counters do not go back down.
 and assert the count went up by exactly one. Real visitors also hit that page. A flake
 there means someone else loaded `/legal-privacy.htm` between the two requests, not that
 the counter is broken — re-run before investigating.
+
+## Wordlist independence
+
+The suite runs against dev and production unchanged, which constrains what it may
+assert. A dev fixture holds a handful of words; production holds about 1.2 billion, so
+anything that depends on *which* words exist will pass in one and fail in the other.
+
+Tests therefore assert the server's contract rather than the dictionary's contents. The
+cap test checks that exactly 20 rows are shown and that the `more` row's counts satisfy
+`hidden == total - 20`, not which twenty words appear. The LM test checks that every
+match uppercases to the queried word and that there is more than one spelling, not that
+the spellings are `hello`/`Hello`/`HELLO`. These are still exact assertions -- they are
+just exact about the right thing.
+
+Two consequences show up in the code:
+
+* **`collapse_repeats`** wraps the row-sequence comparisons. A word in both an
+  algorithm's small and huge table is found twice and rendered identically, because the
+  type column shows the algorithm name rather than the table label. It is real
+  behaviour, matching PHP, and it happens only when the two dictionaries overlap on that
+  word -- which they do in production and do not in dev. The full-match case is the
+  opposite and is pinned exactly by `word_in_both_dictionaries_no_duplicate`, since the
+  early exit there is unconditional.
+* **`a_plaintext_that_is_not_utf8_is_shown_as_bytes` skips against production.** It is
+  the one test that cannot be written wordlist-independently: it needs a word made of
+  invalid UTF-8, and there is no way to locate one in a production list by hash without
+  scanning it. It prints a SKIP line rather than passing silently.
 
 ## The captcha bypass key
 
