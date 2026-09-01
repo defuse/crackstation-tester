@@ -698,25 +698,36 @@ fn assert_capped_block(rows: &[ResultRow], index_prefix: &str, upper: &str) {
         "nothing was truncated, so this tests nothing"
     );
 
-    let exact: Vec<_> = shown.iter().filter(|row| row.class == "suc").collect();
-    assert_eq!(
-        exact.len(),
-        1,
-        "the one exact match must survive the cap, wherever it sits in index order: {:?}",
+    // Full matches are hoisted above the near misses, so the shown rows split cleanly.
+    let boundary = shown.partition_point(|row| row.class == "suc");
+    let (exact, near_misses) = shown.split_at(boundary);
+
+    // At least one, not exactly one: LM is case-insensitive, so every case spelling of
+    // the word that is in the dictionary is a full match -- one in dev, five in
+    // production. What must hold on any wordlist is that the cap did not swallow them.
+    assert!(
+        !exact.is_empty(),
+        "an exact match must survive the cap, wherever index order puts it: {:?}",
         shown
     );
-    assert_eq!(
-        exact[0].result.to_uppercase(),
-        upper,
-        "wrong plaintext: {:?}",
-        exact[0]
-    );
+    for row in exact {
+        assert_eq!(
+            row.result.to_uppercase(),
+            upper,
+            "a full match must be the queried word: {:?}",
+            row
+        );
+    }
 
-    for row in shown.iter().filter(|row| row.class != "suc") {
-        assert_eq!(row.class, "part", "a near miss is yellow: {:?}", row);
+    for row in near_misses {
+        assert_eq!(
+            row.class, "part",
+            "every full match must precede every near miss: {:?}",
+            shown
+        );
         assert!(
             row.hash.starts_with(index_prefix),
-            "a near miss is in this block because it shares the index prefix {}: {:?}",
+            "a near miss shares the index prefix {} that put it in this block: {:?}",
             index_prefix,
             row
         );
